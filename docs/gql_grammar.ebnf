@@ -1,0 +1,488 @@
+(* =====================================================================
+   Gobbler-Query — Simplified KQL-like Grammar
+
+   Covers: basic selection, projection, aggregation, inner join.
+   Intentionally excludes: graph operators, window functions,
+   mv-expand, dynamic/JSON operations, let bindings, extend,
+   case expressions, and join kinds other than inner.
+   ===================================================================== *)
+
+
+(* =====================================================================
+   Key grammar decisions
+   =====================================================================
+
+   1. Pipeline model
+      A query is a source table name followed by zero or more stages
+      separated by "|".  Each stage is a pure function from a record
+      set to a record set — evaluation is strictly left-to-right.
+
+   2. Boolean expression precedence  (where clauses)
+      or  <  and  <  not  <  primary
+      Mirrors standard SQL/KQL precedence.  Parentheses override.
+
+   3. Scalar expression precedence  (project items, compare operands)
+      additive ( + - )  <  multiplicative ( * / )  <  unary ( - )
+      Encoded as left-recursive rule chain: AddExpr → MulExpr → UnaryExpr.
+
+   4. Field references
+      FieldRef ::= Identifier ( "." Identifier )?
+      The optional qualifier carries the source-table (or join alias)
+      name, required when two joined tables share a column name.
+
+   5. Aggregation function arity
+      count() takes NO argument.
+      sum / avg / min / max / dcount each take exactly ONE FieldRef.
+      Enforced by the AggCall rule, not deferred to a semantic pass.
+
+   6. Join — inner only
+      Only inner join is supported; no kind keyword is needed.
+      The "on" clause accepts either same-name shorthand ("on userId")
+      or explicit left/right keys ("on $left.id == $right.userId").
+      Sub-queries inside join are
+      full Query productions, so they may themselves contain where /
+      project / summarize stages.
+
+   7. Identifier syntax
+      Identifiers may contain hyphens after the first character to
+      accommodate Gobbler item-type names such as "alpha-folder".
+
+   8. Time helper
+      ago(N unit) is a first-class literal, not a general function
+      call, to allow typed validation without a full type-inference
+      pass.  Supported units: s m h d w.
+
+   9. Whitespace and comments
+      Whitespace is insignificant between tokens.
+      Line comments start with // and run to end of line.
+      Both are handled at the lexer level and not modelled in rules.
+
+   ===================================================================== *)
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Top-level query
+   ───────────────────────────────────────────────────────────────────── *)
+
+Query      ::= Source ( "|" Stage )*
+
+Source     ::= Identifier          (* item-type name, e.g. alpha-folder *)
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Pipeline stages
+   ───────────────────────────────────────────────────────────────────── *)
+
+Stage      ::= WhereStage
+             | ProjectStage
+             | SummarizeStage
+             | JoinStage
+             | SortStage
+             | TakeStage
+             | CountStage
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   1. Selection  —  where
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Keeps only rows for which BoolExpr is true.
+   Schema is unchanged.
+
+   Example:
+       Logs
+       | where statusCode >= 400 and region == "eastus"
+*)
+
+WhereStage ::= "where" BoolExpr
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   2. Projection  —  project
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Selects and optionally renames or computes output columns.
+   Only the listed columns appear in the output.
+
+   Examples:
+       | project timestamp, statusCode
+       | project ts = timestamp, code = statusCode
+       | project timestamp, duration = endTime - startTime
+*)
+
+ProjectStage ::= "project" ProjectItem ( "," ProjectItem )*
+
+ProjectItem  ::= Identifier "=" ScalarExpr     (* alias = expression *)
+               | FieldRef                       (* bare column reference *)
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   3. Aggregation  —  summarize
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Groups rows by zero or more fields and computes aggregate values.
+   Without a "by" clause the whole table is treated as one group.
+
+   Examples:
+       | summarize count()
+       | summarize total = count() by statusCode
+       | summarize avg(durationMs), max(durationMs) by region, statusCode
+*)
+
+SummarizeStage ::= "summarize" AggList ( "by" FieldList )?
+
+AggList        ::= AggItem ( "," AggItem )*
+
+AggItem        ::= Identifier "=" AggCall      (* alias = agg_func(...) *)
+                 | AggCall                      (* bare agg_func(...) *)
+
+AggCall        ::= AggFuncName "(" FieldRef? ")"
+
+AggFuncName    ::= "count"                      (* count() — no argument *)
+                 | "sum"                         (* sum(field) *)
+                 | "avg"                         (* avg(field) *)
+                 | "min"                         (* min(field) *)
+                 | "max"                         (* max(field) *)
+                 | "dcount"                      (* distinct count(field) *)
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   4. Inner join
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Joins the current result with a sub-query on matching key columns.
+   Only rows that have a match on both sides are kept (inner semantics).
+
+   Simple same-name join:
+       Table1
+       | join (
+           Table2
+           | project userId, userName
+       ) on userId
+
+   Explicit left/right join keys:
+       Table1
+       | join (
+           Table2
+       ) on $left.id == $right.userId
+*)
+
+JoinStage   ::= "join" "(" Query ")" "on" JoinKeyList
+
+JoinKeyList ::= JoinKey ( "," JoinKey )*
+
+JoinKey     ::= ExplicitJoinKey                 (* $left.col == $right.col *)
+              | FieldRef                         (* same-name shorthand *)
+
+ExplicitJoinKey ::= "$left"  "." Identifier
+                    "=="
+                    "$right" "." Identifier
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   5. Sort and take  (supporting operators)
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   | sort by timestamp desc
+   | sort by region asc, timestamp desc
+*)
+
+SortStage  ::= "sort" "by" SortList
+
+SortList   ::= SortItem ( "," SortItem )*
+
+SortItem   ::= FieldRef SortDir?
+
+SortDir    ::= "asc" | "desc"
+
+(*
+   | take 100
+*)
+
+TakeStage  ::= "take" IntegerLit
+
+(*
+   | count
+   Shorthand for | summarize count().
+*)
+
+CountStage ::= "count"
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Boolean expressions  (used in where)
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Operator precedence (low → high):
+       or  <  and  <  not  <  primary
+*)
+
+BoolExpr        ::= OrExpr
+
+OrExpr          ::= AndExpr ( "or" AndExpr )*
+
+AndExpr         ::= NotExpr ( "and" NotExpr )*
+
+NotExpr         ::= "not" PrimaryBoolExpr
+                  | PrimaryBoolExpr
+
+PrimaryBoolExpr ::= "(" BoolExpr ")"
+                  | CompareExpr
+                  | InExpr
+                  | BetweenExpr
+                  | IsNullExpr
+
+
+(* ── Comparison ── *)
+
+(*
+   Examples:
+       statusCode == 200
+       region != "westus"
+       durationMs >= 100
+       message contains "timeout"
+       host startswith "api-"
+       name =~ "Admin"     (* case-insensitive equality *)
+*)
+
+CompareExpr ::= ScalarExpr CompareOp ScalarExpr
+
+CompareOp   ::= "==" | "!=" | "<" | "<=" | ">" | ">="
+              | "=~"                              (* case-insensitive == *)
+              | "contains"                        (* substring, case-insensitive *)
+              | "startswith"                      (* prefix, case-insensitive *)
+              | "endswith"                        (* suffix, case-insensitive *)
+
+
+(* ── Membership test ── *)
+
+(*
+   | where level in ("Error", "Warning")
+   | where code !in (200, 201, 204)
+*)
+
+InExpr  ::= FieldRef "in"  "(" LiteralList ")"
+          | FieldRef "!in" "(" LiteralList ")"
+
+
+(* ── Range test ── *)
+
+(*
+   | where durationMs between (100 .. 500)
+*)
+
+BetweenExpr ::= FieldRef "between" "(" Literal ".." Literal ")"
+
+
+(* ── Null / empty tests ── *)
+
+(*
+   | where isnotnull(userId)
+   | where isempty(message)
+*)
+
+IsNullExpr  ::= "isnull"    "(" FieldRef ")"
+              | "isnotnull" "(" FieldRef ")"
+              | "isempty"   "(" FieldRef ")"
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Scalar expressions  (used in project items and comparisons)
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Arithmetic with standard precedence.
+
+   Examples:
+       endTime - startTime
+       quantity * price
+       -offset
+*)
+
+ScalarExpr  ::= AddExpr
+
+AddExpr     ::= MulExpr ( ( "+" | "-" ) MulExpr )*
+
+MulExpr     ::= UnaryExpr ( ( "*" | "/" ) UnaryExpr )*
+
+UnaryExpr   ::= "-" UnaryExpr
+              | PrimaryScalar
+
+PrimaryScalar ::= Literal
+                | FieldRef
+                | AgoExpr
+                | "(" ScalarExpr ")"
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Time helper
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   | where timestamp > ago(1h)
+   | where timestamp > ago(7d)
+*)
+
+AgoExpr      ::= "ago" "(" TimespanLit ")"
+
+TimespanLit  ::= IntegerLit TimespanUnit
+
+TimespanUnit ::= "s"        (* seconds *)
+               | "m"        (* minutes *)
+               | "h"        (* hours   *)
+               | "d"        (* days    *)
+               | "w"        (* weeks   *)
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Literals
+   ───────────────────────────────────────────────────────────────────── *)
+
+LiteralList ::= Literal ( "," Literal )*
+
+Literal     ::= StringLit
+              | FloatLit
+              | IntegerLit
+              | BooleanLit
+              | DatetimeLit
+              | AgoExpr
+
+(*
+   String:   "hello world"   (double-quoted, no escape sequences at this level)
+   Integer:  42  0  -1       (sign handled by UnaryExpr)
+   Float:    3.14  0.5
+   Boolean:  true  false
+   Datetime: datetime(2026-01-15)  datetime(2026-01-15 09:30:00)
+*)
+
+StringLit   ::= '"' StringChar* '"'
+
+StringChar  ::= [^\"\n\r\\]
+              | '\\' ( '"' | '\\' | 'n' | 'r' | 't' )
+
+IntegerLit  ::= Digit+
+
+FloatLit    ::= Digit+ "." Digit+
+
+BooleanLit  ::= "true" | "false"
+
+DatetimeLit ::= "datetime" "(" DateStr ")"
+
+DateStr     ::= Digit Digit Digit Digit "-" Digit Digit "-" Digit Digit
+                ( " " Digit Digit ":" Digit Digit
+                  ( ":" Digit Digit )? )?
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Identifiers and field references
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Field reference with optional table (or alias) prefix:
+       statusCode           -- unqualified
+       alpha.statusCode     -- table-qualified (used after a join)
+*)
+
+FieldRef   ::= Identifier ( "." Identifier )?
+
+FieldList  ::= FieldRef ( "," FieldRef )*
+
+(*
+   Identifiers may contain hyphens to match Gobbler item-type names
+   such as "alpha-folder".  A hyphen is only valid after the first char.
+*)
+
+Identifier ::= IdentStart IdentCont*
+
+IdentStart ::= [a-zA-Z_]
+
+IdentCont  ::= [a-zA-Z0-9_-]
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Terminals
+   ───────────────────────────────────────────────────────────────────── *)
+
+Digit      ::= [0-9]
+
+
+(* ─────────────────────────────────────────────────────────────────────
+   Whitespace and comments  (lexer-level, not modelled in productions)
+   ───────────────────────────────────────────────────────────────────── *)
+
+(*
+   Whitespace (spaces, tabs, newlines) is insignificant between tokens.
+   Line comments begin with // and run to end of line.
+*)
+
+
+(* =====================================================================
+   Operator precedence summary
+   =====================================================================
+
+   Boolean (where expressions)
+   ┌─────────────┬────────────────────────────────────────────┐
+   │ Precedence  │ Operator                                   │
+   ├─────────────┼────────────────────────────────────────────┤
+   │ lowest      │ or                                         │
+   │             │ and                                        │
+   │             │ not                                        │
+   │ highest     │ primary ( ==  !=  <  <=  >  >=  =~  ...  │
+   │             │           in  !in  between  isnull … )    │
+   └─────────────┴────────────────────────────────────────────┘
+
+   Scalar (project / compare operands)
+   ┌─────────────┬────────────────────────────────────────────┐
+   │ Precedence  │ Operator                                   │
+   ├─────────────┼────────────────────────────────────────────┤
+   │ lowest      │ + -  (additive)                            │
+   │             │ * /  (multiplicative)                      │
+   │ highest     │ unary -                                    │
+   └─────────────┴────────────────────────────────────────────┘
+
+   ===================================================================== *)
+
+
+(* =====================================================================
+   Example queries
+   =====================================================================
+
+   -- 1. Basic selection
+   Logs
+   | where statusCode >= 400
+   | where region == "eastus" and timestamp > ago(1h)
+   | sort by timestamp desc
+   | take 50
+
+   -- 2. Projection
+   Logs
+   | where statusCode >= 500
+   | project timestamp, host, statusCode, duration = endTime - startTime
+
+   -- 3. Aggregation
+   Logs
+   | where timestamp > ago(24h)
+   | summarize
+       total     = count(),
+       errors    = count(),
+       avgDur    = avg(durationMs),
+       maxDur    = max(durationMs)
+     by region, statusCode
+   | sort by total desc
+
+   -- 4. Inner join
+   Requests
+   | where timestamp > ago(1h)
+   | join (
+       Users
+       | project userId, userName, tier
+   ) on userId
+   | summarize count() by tier
+
+   ===================================================================== *)
