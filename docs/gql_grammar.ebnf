@@ -52,7 +52,16 @@
       call, to allow typed validation without a full type-inference
       pass.  Supported units: s m h d w.
 
-   9. Whitespace and comments
+   9. Source time window
+      Every source requires an explicit time window in parentheses:
+          Logs(*)                              — full scan; no time filter
+          Logs(last 7d)                        — relative lookback (TimespanLit)
+          Logs(datetime(T1) .. datetime(T2))   — absolute range (DatetimeLit)
+      Omitting the window is a parse error.  This prevents silent full scans.
+      DatetimeLit uses Gobbler's native format: YYYY-MM-DD HH:MM:SS.mmm
+      (space separator, no T, no timezone, milliseconds optional).
+
+  10. Whitespace and comments
       Whitespace is insignificant between tokens.
       Line comments start with // and run to end of line.
       Both are handled at the lexer level and not modelled in rules.
@@ -66,7 +75,11 @@
 
 Query      ::= Source ( "|" Stage )*
 
-Source     ::= Identifier          (* item-type name, e.g. alpha-folder *)
+Source     ::= Identifier "(" TimeWindow ")"  (* item-type name + required time window *)
+
+TimeWindow ::= "*"                           (* full scan — no time filter applied *)
+             | "last" TimespanLit            (* relative lookback, e.g. last 24h, last 7d *)
+             | DatetimeLit ".." DatetimeLit  (* absolute range *)
 
 
 (* ─────────────────────────────────────────────────────────────────────
@@ -358,7 +371,7 @@ Literal     ::= StringLit
    Integer:  42  0  -1       (sign handled by UnaryExpr)
    Float:    3.14  0.5
    Boolean:  true  false
-   Datetime: datetime(2026-01-15)  datetime(2026-01-15 09:30:00)
+   Datetime: datetime(2026-01-15)  datetime(2026-01-15 09:30:00)  datetime(2026-01-15 09:30:00.000)
 *)
 
 StringLit   ::= '"' StringChar* '"'
@@ -376,7 +389,7 @@ DatetimeLit ::= "datetime" "(" DateStr ")"
 
 DateStr     ::= Digit Digit Digit Digit "-" Digit Digit "-" Digit Digit
                 ( " " Digit Digit ":" Digit Digit
-                  ( ":" Digit Digit )? )?
+                  ( ":" Digit Digit ( "." Digit Digit Digit )? )? )?
 
 
 (* ─────────────────────────────────────────────────────────────────────

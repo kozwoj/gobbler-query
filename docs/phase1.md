@@ -83,10 +83,10 @@ So `Source` → CSVBatchReader, after the source name is resolved to a path by t
 
 Before the engine can execute any query, it must be given a **storage root** — the context that maps type names to data locations.
 
-A query source is always a **type name**, not a path:
+A query source is always a **type name with a required time window**, not a path:
 
 ```
-Logs                        ← type name, not a file path
+Logs(last 24h)              ← type name + required time window
 | where statusCode >= 400
 ```
 
@@ -95,7 +95,7 @@ The engine resolves `Logs` to an actual location using the storage root:
 | Mode | Root | Type name resolves to |
 |------|------|-----------------------|
 | File | Root directory path | `<rootDir>/Logs/` — the subdirectory gobbler writes for that type |
-| Blob | Storage account name | Azure container named `Logs` |
+| Blob | Storage account name + account key | Azure container named `Logs` in the given account |
 
 ### `StorageRoot` interface (`query/catalog/`):
 
@@ -114,7 +114,7 @@ type StorageRoot interface {
 ```go
 // FileRoot points to a local directory that gobbler has written output into.
 type FileRoot struct {
-    Dir string // e.g. "C:\\data\\gobbler-output"
+    Dir string // e.g. "C:\\temp\\gobbler-output"
 }
 
 func (r *FileRoot) Resolve(typeName string) (string, error) {
@@ -122,7 +122,24 @@ func (r *FileRoot) Resolve(typeName string) (string, error) {
 }
 ```
 
-The `LogicalSource` node holds the **type name** only. The physical plan builder receives the root and calls `Resolve` when constructing a `SourceOp`.
+### Phase 1 implementation (blob mode):
+
+```go
+// BlobRoot points to an Azure Blob Storage account that gobbler has written output into.
+// Both AccountName and AccountKey are required to authenticate against the storage account.
+type BlobRoot struct {
+    AccountName string // e.g. "mystorageaccount"
+    AccountKey  string // base64-encoded storage account key
+}
+
+func (r *BlobRoot) Resolve(typeName string) (string, error) {
+    // Returns a connection string or structured identifier used by the blob source reader.
+    // The type name maps to a container of the same name within the account.
+    return fmt.Sprintf("https://%s.blob.core.windows.net/%s", r.AccountName, typeName), nil
+}
+```
+
+The account key is kept in `BlobRoot` rather than embedded in the resolved URL so that credentials are never serialised into the logical or physical plan. The physical plan builder receives the root and calls `Resolve` when constructing a `SourceOp`.
 
 ---
 
@@ -496,18 +513,20 @@ Files:
 
 ```
 reader.go        // BatchReader interface
-file_source.go   // FileSource: reads local CSV files (Phase 1)
-pruning.go       // file selection by time range
-schema.go        // reads type.json
+file_source.go   // FileSource: reads local CSV files (file mode)
+blob_source.go   // BlobSource: reads CSV blobs from Azure Blob Storage (blob mode)
+pruning.go       // source selection by time range (shared by file and blob)
+schema.go        // reads type.json from local directory or blob container
 decode.go        // typed column decoding
 ```
 
 Defines:
 
-- `BatchReader` interface — the contract the planner and exec layer use  
-- `FileSource` — Phase 1: given a directory path, lists CSV files, applies time-range filter, reads schema from `type.json`, produces batches  
+- `BatchReader` interface — the contract the planner and exec layer use; identical for file and blob mode  
+- `FileSource` — file mode: lists CSV files in a local directory by time window, reads schema from `type.json`, produces batches  
+- `BlobSource` — blob mode: lists CSV blobs in an Azure container by time window, streams each blob, reads schema from `type.json` in the container, produces batches  
 
-Phase 2 will add `BlobSource` for Azure blob storage (same `BatchReader` interface, different backing store).
+The CSV parsing layer (`CSVBatchReader`) is shared — `FileSource` opens local files and `BlobSource` streams blobs, but both hand the resulting `io.Reader` to the same decoder.
 
 ---
 
@@ -559,11 +578,11 @@ planner.go
 Responsibilities:
 
 - build logical plan from AST  
-- extract time range from WHERE predicates and pass to source  
+- extract time range from the source time window and pass it to the source  
 - build physical plan (lower logical nodes → operators)  
-- choose operator implementations  
+- choose operator implementations (FileSource vs BlobSource based on the StorageRoot type)  
 
-File selection and timestamp filtering live in `query/source/`, not here.
+Source selection and timestamp filtering live in `query/source/`, not here.
 
 ---
 
@@ -579,9 +598,8 @@ catalog.go
 Defines:
 
 - `StorageRoot` interface  
-- `FileRoot` (Phase 1: local directory)  
-
-Phase 2 will add `BlobRoot` for Azure blob storage (storage account + container per type).
+- `FileRoot` — file mode: resolves a type name to a local subdirectory  
+- `BlobRoot` — blob mode: resolves a type name to an Azure container; holds account name and account key
 
 ---
 
@@ -610,7 +628,7 @@ Because it:
 
 - isolates the query engine  
 - isolates the parser  
-- isolates the CSV reader  
+- isolates the data source reader (file or blob)  
 - keeps storage out of the picture  
 - allows Phase 2 to drop in a SegmentReader without touching operators  
 - keeps the public API clean  
@@ -890,7 +908,34 @@ Within the selected range, the row-level `where` filter still applies:
 
 **Correctness guarantee**: file selection is I/O optimisation only. The `where` operator is always the source of truth.
 
-**Owner**: `source/pruning.go`. `FileSource` applies this rule; the planner extracts `[T_start, T_end]` from WHERE predicates and passes it in.
+**Owner**: `source/pruning.go`. `FileSource` applies this rule; the planner extracts `[T_start, T_end]` from the source time window and passes it in.
+
+---
+
+### Time window (required source modifier)
+
+Every source requires an explicit time window — it is part of the `Source` syntax and a parse error to omit it. This prevents accidental full-table scans.
+
+Three forms are supported:
+
+| Form | Example | Meaning |
+|------|---------|---------|
+| Relative lookback | `Logs(last 24h)` | All files from `now() − 24h` onward |
+| Absolute range | `Logs(datetime(2026-01-15 09:00:00) .. datetime(2026-01-15 18:00:00))` | Files overlapping the given range |
+| Full scan | `Logs(*)` | All files — no time filter applied |
+
+**`DatetimeLit` format**: Gobbler's native datetime format — `YYYY-MM-DD HH:MM:SS.mmm` (space separator, no `T`, no timezone designator). The time part and milliseconds are optional:
+- `datetime(2026-01-15)` — day precision
+- `datetime(2026-01-15 09:30:00)` — second precision
+- `datetime(2026-01-15 09:30:00.000)` — millisecond precision
+
+**`last <duration>`**: the planner computes `T_start = now() − duration` at query start time and selects files from the first one where `file_timestamp >= T_start` onward. No upper-bound file pruning is applied for this form.
+
+**`*` (full scan)**: all files in the type's directory/container are read. Requiring the literal `*` rather than allowing a bare `Logs` makes the cost intentionally visible in the query text.
+
+Cost reminder — in blob mode every matching blob must be opened and downloaded. Use narrow windows for large types.
+
+**Phase 2 note**: once segment metadata (min/max statistics per segment) is available, the planner will use the time window to prune segments before opening any files or blobs — eliminating I/O for segments outside the window without changing query syntax.
 
 ---
 
