@@ -168,7 +168,7 @@ AggFuncName    ::= "count"                      (* count() — no argument *)
 
 (*
    Joins the current result with a sub-query on matching key columns.
-   Only rows that have a match on both sides are kept (inner semantics).
+   Only rows that have a match on both sides are kept (inner join semantics).
 
    Simple same-name join:
        Table1
