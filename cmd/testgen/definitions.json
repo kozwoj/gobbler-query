@@ -1,0 +1,68 @@
+[
+    {
+        "name": "requests",
+        "documentation": "Authentication service access log. One row per inbound request.",
+        "latencyMinutes": 720,
+        "orderedColumns": [
+            {
+                "name": "requestId",
+                "type": "string"
+            },
+            {
+                "name": "userId",
+                "type": "string",
+                "optional": true
+            },
+            {
+                "name": "requestCode",
+                "type": "string"
+            },
+            {
+                "name": "statusCode",
+                "type": "int"
+            },
+            {
+                "name": "durationMs",
+                "type": "real"
+            },
+            {
+                "name": "region",
+                "type": "string",
+                "optional": true
+            },
+            {
+                "name": "ttl",
+                "type": "timespan",
+                "optional": true
+            }
+        ]
+    },
+    {
+        "name": "users",
+        "documentation": "User dimension table. One row per registered user.",
+        "latencyMinutes": 10,
+        "orderedColumns": [
+            {
+                "name": "userId",
+                "type": "string"
+            },
+            {
+                "name": "tier",
+                "type": "string"
+            },
+            {
+                "name": "active",
+                "type": "bool"
+            },
+            {
+                "name": "countryCode",
+                "type": "string",
+                "optional": true
+            },
+            {
+                "name": "signupDate",
+                "type": "datetime"
+            }
+        ]
+    }
+]

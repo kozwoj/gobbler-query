@@ -9,23 +9,75 @@ The unit of data flowing through the pipeline is a `Batch`. Every operator consu
 
 ```go
 type Batch struct {
-    Length  int
+    Length  int          // number of rows in this batch
+    Schema  []ColumnMeta // parallel to Columns; one entry per column
     Columns []ColumnVector
-    Sel     []int    // optional selection vector
-    Bitmap  []uint64 // optional bitmap
 }
 ```
 
-`ColumnVector` is an interface implemented by typed slices:
+`Length` is always the actual row count. There is no selection vector in Phase 1 —
+every batch is dense. `FilterOp` compacts passing rows into new column vectors
+rather than maintaining a `Sel` index. A `Sel` field may be added in Phase 2 if
+profiling shows compaction cost matters.
+
+Every operator allocates and returns a new `*Batch`. No batch pointer is ever
+mutated after it is returned, and no backing arrays are aliased between the
+returned batch and the operator's internal state. This eliminates lifetime
+contracts at the cost of allocation, which is acceptable for Phase 1 workloads
+(short-lived batches, low live set, negligible GC pressure).
+
+The exception is `SortOp`, `HashAggregateOp`, and `HashJoinOp`: all three
+fully materialise their input (or one side of it) into internal storage before
+emitting any output, so they carry the same class of heap pressure regardless
+of the allocation strategy. `HashJoinOp` materialises the entire right
+(build) subquery into a hash table; the left (probe) side then streams through
+it batch by batch.
+
+`ColumnMeta` describes a single column's identity:
 
 ```go
-type Int32Vector struct {
-    Values []int32
-    Nulls  []uint64 // one bit per row; set = null
+// ColumnMeta carries the name and origin of a column.
+// Origin is the source type name (e.g. "requests") for columns that come
+// directly from a CSV source, and empty for computed or aggregate columns.
+type ColumnMeta struct {
+    Name   string
+    Origin string
 }
 ```
 
-Phase 1 uses raw `string` slices for string columns. Phase 2 will replace these with dictionary-encoded vectors.
+Ambiguity resolution after a join: a `FieldRef{Table:"", Name:"x"}` matches any
+column where `Name == "x"`; if two or more columns match, the expression compiler
+returns an error and the query must qualify the reference (e.g. `requests.x`).
+A `FieldRef{Table:"requests", Name:"x"}` matches only columns where both
+`Name == "x"` and `Origin == "requests"`.
+
+`ColumnVector` is an interface:
+
+```go
+// ColumnVector is implemented by each typed vector.
+// Expression evaluators type-assert to the concrete type; Len and IsNull
+// allow generic null-checking without a type assertion.
+type ColumnVector interface {
+    Len() int
+    IsNull(i int) bool
+    columnVector() // unexported marker; prevents external implementations
+}
+```
+
+Concrete types (one per `ColumnType`):
+
+```go
+type Int32Vector    struct { Values []int32;       Nulls []uint64 }
+type Float64Vector  struct { Values []float64;     Nulls []uint64 }
+type StringVector   struct { Values []string;      Nulls []uint64 } // Phase 1; dictionary-encoded in Phase 2
+type BoolVector     struct { Values []bool;        Nulls []uint64 }
+type DatetimeVector struct { Values []time.Time;   Nulls []uint64 }
+type TimespanVector struct { Values []time.Duration; Nulls []uint64 }
+type DynamicVector  struct { Values []string;      Nulls []uint64 } // plain JSON string
+```
+
+`Nulls` is a packed bitset: bit `i` set means row `i` is null.
+All concrete types implement `Len()`, `IsNull(i int) bool`, and `columnVector()`.
 
 ---
 
@@ -64,7 +116,9 @@ func (op *SourceOp) Next() (*batch.Batch, error) {
 ```
 
 ### FilterOp
-Evaluates a compiled `BoolExpr` row-by-row and produces a selection vector.
+Evaluates a compiled `BoolExpr` row-by-row and **compacts** the passing rows
+into a new `*Batch` with fresh column vectors. The output is always a dense batch
+with `Length` equal to the number of passing rows.
 
 ```go
 type FilterOp struct {

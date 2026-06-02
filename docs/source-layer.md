@@ -1,54 +1,120 @@
 # Source Layer
-*StorageRoot · Schema · CSVBatchReader · File selection · Time window*
+*Catalog · Schema · CSVBatchReader · File selection · Time window*
 
 ---
 
-## 1. StorageRoot
+## 1. Catalog
 
-Before the engine can execute any query it must be given a **storage root** — the context that maps type names to data locations. Type names are never resolved to paths inside the planner or operators; resolution happens once, at `SourceOp` construction time.
+Before the engine can execute any query it must be given a **catalog** — a map
+from query-visible table names to their physical storage locations. Table names
+are never resolved to paths inside the planner or operators; resolution happens
+once, at `SourceOp` construction time.
+
+### Storage model
+
+Gobbler writes each item type's CSV files into a named bucket:
+
+- **File mode** — a subdirectory of `outputDir`
+- **Blob mode** — an Azure Blob Storage container
+
+The bucket name is the item definition's `folder` property when set, or the type
+name when `folder` is unset. Multiple item types can share a bucket (same
+`folder` value). The query-visible table name is always the item type's `name`
+field — never the `folder` value.
+
+Because mode is per-entry, a catalog can in principle mix file-backed and
+blob-backed tables in the same query.
+
+### Types
 
 ```go
 package catalog
 
-// StorageRoot resolves type names to data source paths.
-type StorageRoot interface {
-    Resolve(typeName string) (path string, err error)
+type StorageMode int
+
+const (
+    StorageModeFile StorageMode = iota
+    StorageModeBlob
+)
+
+// TableEntry describes where one query table's data lives in storage.
+// StorageBucket is pre-resolved from the item definition's "folder" property
+// (or the type name when "folder" is unset). The engine never sees that
+// indirection — it works only with the resolved name.
+type TableEntry struct {
+    StorageBucket string      // subdirectory name (file) or container name (blob)
+    Mode        StorageMode
+
+    // File mode only.
+    OutputDir string
+
+    // Blob mode only.
+    AccountName string
+    AccountKey  string // never serialised into the logical or physical plan
 }
+
+// Resolve returns the fully-qualified path (file mode) or URL (blob mode)
+// for this entry's storage bucket.
+func (e *TableEntry) Resolve() (string, error) {
+    switch e.Mode {
+    case StorageModeFile:
+        return filepath.Join(e.OutputDir, e.StorageBucket), nil
+    case StorageModeBlob:
+        return fmt.Sprintf("https://%s.blob.core.windows.net/%s",
+            e.AccountName, e.StorageBucket), nil
+    default:
+        return "", fmt.Errorf("unknown storage mode %d", e.Mode)
+    }
+}
+
+// Catalog maps query-visible table names to their storage locations.
+// Key: item type name (the "name" field in the item definition).
+// Value: pre-resolved storage entry.
+type Catalog map[string]*TableEntry
 ```
 
-### File mode
+### Example
+
+An auth-service Gobbler instance using file mode with three types, two of which
+share a folder:
+
+```json
+{
+  "name": "login",   "folder": "auth-events" }
+  "name": "signup",  "folder": "auth-events" }
+  "name": "userinfo"                          }
+```
+
+Catalog constructed from those definitions:
 
 ```go
-// FileRoot points to a local directory that gobbler has written output into.
-type FileRoot struct {
-    Dir string // e.g. "C:\\temp\\gobbler-output"
-}
-
-func (r *FileRoot) Resolve(typeName string) (string, error) {
-    return filepath.Join(r.Dir, typeName), nil
+Catalog{
+    "login":    &TableEntry{StorageBucket: "auth-events", Mode: StorageModeFile, OutputDir: "/data"},
+    "signup":   &TableEntry{StorageBucket: "auth-events", Mode: StorageModeFile, OutputDir: "/data"},
+    "userinfo": &TableEntry{StorageBucket: "userinfo",    Mode: StorageModeFile, OutputDir: "/data"},
 }
 ```
 
-### Blob mode
+`login` and `signup` resolve to the same directory (`/data/auth-events`); their
+CSV files are interleaved in that directory and distinguished by type name in the
+filename. `userinfo` resolves to `/data/userinfo`.
+
+### Engine usage
 
 ```go
-// BlobRoot points to an Azure Blob Storage account.
-// The account key is held here so it is never serialised into the logical or physical plan.
-type BlobRoot struct {
-    AccountName string // e.g. "mystorageaccount"
-    AccountKey  string // base64-encoded storage account key
+entry, ok := catalog[tableName]
+if !ok {
+    return nil, fmt.Errorf("unknown table %q", tableName)
 }
-
-func (r *BlobRoot) Resolve(typeName string) (string, error) {
-    // Type name maps to a container of the same name within the account.
-    return fmt.Sprintf("https://%s.blob.core.windows.net/%s", r.AccountName, typeName), nil
+path, err := entry.Resolve()
+if err != nil {
+    return nil, err
 }
+src, err := source.NewFileSource(path, tableName, start, end, batchSize)
 ```
 
-| Mode | Root | Type name resolves to |
-|---|---|---|
-| File | Root directory path | `<rootDir>/Logs/` — subdirectory gobbler writes for that type |
-| Blob | Storage account name + key | Azure container named `Logs` in the given account |
+How the catalog is constructed and passed to the engine is a gobbler-query API
+concern, to be designed separately.
 
 ---
 
@@ -83,37 +149,77 @@ type Schema struct {
 
 ## 3. CSVBatchReader
 
-### Public API
+### BatchReader interface
+
+`SourceOp` depends on this interface, not on any concrete type:
 
 ```go
-package csvreader
-
-type Reader struct {
-    r         *csv.Reader
-    schema    *Schema
-    batchSize int
+// BatchReader is the interface satisfied by FileSource (and BlobSource in future).
+type BatchReader interface {
+    NextBatch() (*batch.Batch, error)
+    Close() error
 }
-
-func NewReader(path string, batchSize int) (*Reader, error)
-
-func (r *Reader) Schema() *Schema
-
-func (r *Reader) NextBatch() (*batch.Batch, error)
 ```
 
-- `Schema()` returns the schema read from `type.json`.
-- `NextBatch()` returns `nil, io.EOF` when the file is exhausted.
-- `batch.Batch` is from `query/batch`.
+### FileSource
+
+`FileSource` implements `BatchReader`. It treats the set of selected CSV files as
+one logical sequence of rows and fills each batch to exactly `batchSize` rows,
+crossing file boundaries as needed. Only the final batch of the entire sequence
+may be smaller.
+
+```go
+func NewFileSource(typeDir string, typeName string, start, end time.Time, batchSize int) (*FileSource, error)
+```
+
+- `typeDir` — the resolved directory for this type (from `TableEntry.Resolve`).
+- `typeName` — stored as the `Origin` in every `ColumnMeta` this source emits.
+- `start`, `end` — the resolved time window (zero = open bound).
+- Loads `type.json` from `typeDir` on construction; returns error if missing or
+  malformed.
+- Runs file-selection pruning at construction time; stores the ordered file list.
+- Opens the first file immediately so schema field-count validation happens before
+  any `NextBatch` call.
+
+**Batch size is a configurable parameter** passed to `NewFileSource`. Tests use
+256 rows — small enough to produce multiple batches per testgen file (500 rows)
+and to exercise cross-file batch boundaries, while remaining a realistic value
+that needs no special-casing in production code.
+
+### Logical concatenation and row-level filtering
+
+The selected files are logically concatenated into a single ordered row stream.
+`timestamp` is always column 0 (Gobbler prepends it). Row-level timestamp checks
+are applied only to the boundary files:
+
+| Position in selection | Row-level rule |
+|---|---|
+| First file only | Skip rows where `timestamp < start` (leading skip) |
+| Middle files | All rows included — no per-row check |
+| Last file only | Stop when `timestamp > end` (trailing stop) |
+| First == Last (one file) | Both leading skip and trailing stop apply |
+| Open bound (`start` or `end` zero) | The corresponding check is skipped |
+| Full scan `(*)` | No row-level filtering at all |
+
+This means the inner read loop performs a timestamp parse only for rows in the
+boundary files; middle-file rows are appended to the builders without any
+timestamp inspection.
 
 ### Internal structure
 
 ```go
-type Reader struct {
-    file         *os.File
-    r            *csv.Reader
-    schema       *Schema
-    batchSize    int
-    colBuilders  []columnBuilder // scratch buffers reused across batches
+type FileSource struct {
+    files       []string        // ordered selected file paths
+    fileIdx     int             // index of the currently open file
+    file        *os.File        // currently open file handle
+    csv         *csv.Reader     // wraps file
+    schema      *Schema         // loaded once from type.json
+    typeName    string
+    batchSize   int
+    start       time.Time       // zero = open lower bound
+    end         time.Time       // zero = open upper bound
+    colBuilders []columnBuilder // scratch buffers; sized batchSize, reused across all batches
+    done        bool
 }
 ```
 
@@ -127,51 +233,42 @@ type columnBuilder interface {
 }
 ```
 
-Concrete builders: `int32Builder`, `float64Builder`, `stringBuilder`, `boolBuilder`, `datetimeBuilder`, `timespanBuilder`, `dynamicBuilder`.
+Concrete builders: `int32Builder`, `float64Builder`, `stringBuilder`, `boolBuilder`,
+`datetimeBuilder`, `timespanBuilder`, `dynamicBuilder`.
 
 `timespanBuilder` parses cells with `time.ParseDuration` and stores `time.Duration`.
 
-`dynamicBuilder` is identical to `stringBuilder`. Gobbler writes dynamic fields as CSV-quoted JSON, so Go's `csv.Reader` automatically unquotes the field before `Append` is called — the builder stores a plain JSON string.
+`dynamicBuilder` is identical to `stringBuilder`. Gobbler writes dynamic fields as
+CSV-quoted JSON, so Go's `csv.Reader` automatically unquotes the field before
+`Append` is called — the builder stores a plain JSON string.
 
-### NextBatch
+### NextBatch logic
 
-```go
-func (r *Reader) NextBatch() (*batch.Batch, error) {
-    rows := 0
+``` go
+rows = 0
+loop until rows == batchSize:
+    rec, err = csv.Read()
+    if err == EOF:
+        advance to next file
+        if no next file: break          // end of sequence
+        continue                        // refill from new file
+    if err != nil: return error
 
-    for rows < r.batchSize {
-        rec, err := r.r.Read()
-        if err == io.EOF {
-            break
-        }
-        if err != nil {
-            return nil, err
-        }
+    ts = parse rec[0] as datetime
+    if isFirstFile and ts < start: continue   // leading skip
+    if isLastFile  and ts > end:  break       // trailing stop
 
-        for colIdx, raw := range rec {
-            r.colBuilders[colIdx].Append(raw)
-        }
-        rows++
-    }
+    for each column: builders[col].Append(rec[col])
+    rows++
 
-    if rows == 0 {
-        return nil, io.EOF
-    }
-
-    cols := make([]batch.ColumnVector, len(r.schema.Columns))
-    for i := range cols {
-        cols[i] = r.colBuilders[i].Build(rows)
-        r.colBuilders[i].Reset()
-    }
-
-    return &batch.Batch{
-        Length:  rows,
-        Columns: cols,
-    }, nil
-}
+if rows == 0: return nil, io.EOF
+build and return Batch{Length: rows, ...}
+reset all builders
 ```
 
-No allocations inside the inner loop. Builders reuse their `values` and `nulls` slices across every batch (each sized `batchSize` / `batchSize/64` respectively), keeping GC pressure low.
+No allocations inside the inner loop. Builders pre-allocate their `values` and
+`nulls` slices once at construction (sized `batchSize` and `batchSize/64`
+respectively) and reuse them across every batch.
 
 ### Column builders
 
@@ -224,10 +321,14 @@ func (b *stringBuilder) Append(raw string) {
 
 ### Error handling
 
-- **Empty cell** — treated as null for all types (null bit set). Gobbler writes `""` for any absent optional field.
+- **Empty cell** — treated as null for all types (null bit set). Gobbler writes
+  `""` for any absent optional field.
 - **Malformed non-empty value** — treated as null in Phase 1 rather than failing.
 - **CSV parse errors** — propagated immediately.
-- **Schema mismatch** — `NewReader` reads the first data row on open and counts its fields. If the field count does not match `type.json`, it returns an error before any row is processed (descriptive: file path, expected count, actual count). This catches stale CSV files left over after a type definition change.
+- **Schema mismatch** — on opening each file, the first data row's field count is
+  compared against `type.json`. If mismatched, returns an error before any row is
+  appended (descriptive: file path, expected count, actual count). This catches
+  stale CSV files left over after a type definition change.
 
 ---
 

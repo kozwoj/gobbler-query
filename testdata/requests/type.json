@@ -1,0 +1,37 @@
+{
+  "name": "requests",
+  "orderedColumns": [
+    {
+      "name": "timestamp",
+      "type": "datetime"
+    },
+    {
+      "name": "requestId",
+      "type": "string"
+    },
+    {
+      "name": "userId",
+      "type": "string"
+    },
+    {
+      "name": "requestCode",
+      "type": "string"
+    },
+    {
+      "name": "statusCode",
+      "type": "int"
+    },
+    {
+      "name": "durationMs",
+      "type": "real"
+    },
+    {
+      "name": "region",
+      "type": "string"
+    },
+    {
+      "name": "ttl",
+      "type": "timespan"
+    }
+  ]
+}

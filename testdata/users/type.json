@@ -1,0 +1,29 @@
+{
+  "name": "users",
+  "orderedColumns": [
+    {
+      "name": "timestamp",
+      "type": "datetime"
+    },
+    {
+      "name": "userId",
+      "type": "string"
+    },
+    {
+      "name": "tier",
+      "type": "string"
+    },
+    {
+      "name": "active",
+      "type": "bool"
+    },
+    {
+      "name": "countryCode",
+      "type": "string"
+    },
+    {
+      "name": "signupDate",
+      "type": "datetime"
+    }
+  ]
+}

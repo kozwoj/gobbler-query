@@ -257,6 +257,8 @@ func TestP4_SortThenTake(t *testing.T) {
 
 // J1: Full join pipeline — left side filtered; right side is a projected sub-query;
 // result is projected, sorted, and limited.
+// timestamp is unqualified: the right sub-query projects away users.timestamp,
+// so only one timestamp column exists in the join output.
 //
 //	requests(last 1h)
 //	| where statusCode >= 400
