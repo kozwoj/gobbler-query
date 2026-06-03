@@ -1,5 +1,5 @@
 # Source Layer
-*Catalog · Schema · CSVBatchReader · File selection · Time window*
+*Catalog · Schema · TableReader · Entry selection · Time window*
 
 ---
 
@@ -42,8 +42,9 @@ const (
 // (or the type name when "folder" is unset). The engine never sees that
 // indirection — it works only with the resolved name.
 type TableEntry struct {
+    TypeName      string      // query-visible table name (equals key in Catalog)
     StorageBucket string      // subdirectory name (file) or container name (blob)
-    Mode        StorageMode
+    Mode          StorageMode
 
     // File mode only.
     OutputDir string
@@ -89,9 +90,9 @@ Catalog constructed from those definitions:
 
 ```go
 Catalog{
-    "login":    &TableEntry{StorageBucket: "auth-events", Mode: StorageModeFile, OutputDir: "/data"},
-    "signup":   &TableEntry{StorageBucket: "auth-events", Mode: StorageModeFile, OutputDir: "/data"},
-    "userinfo": &TableEntry{StorageBucket: "userinfo",    Mode: StorageModeFile, OutputDir: "/data"},
+    "login":    &TableEntry{TypeName: "login",    StorageBucket: "auth-events", Mode: StorageModeFile, OutputDir: "/data"},
+    "signup":   &TableEntry{TypeName: "signup",   StorageBucket: "auth-events", Mode: StorageModeFile, OutputDir: "/data"},
+    "userinfo": &TableEntry{TypeName: "userinfo", StorageBucket: "userinfo",    Mode: StorageModeFile, OutputDir: "/data"},
 }
 ```
 
@@ -106,11 +107,7 @@ entry, ok := catalog[tableName]
 if !ok {
     return nil, fmt.Errorf("unknown table %q", tableName)
 }
-path, err := entry.Resolve()
-if err != nil {
-    return nil, err
-}
-src, err := source.NewFileSource(path, tableName, start, end, batchSize)
+reader, err := source.NewTableReader(entry, start, end, batchSize)
 ```
 
 How the catalog is constructed and passed to the engine is a gobbler-query API
@@ -147,68 +144,59 @@ type Schema struct {
 
 ---
 
-## 3. CSVBatchReader
+## 3. TableReader
 
-### BatchReader interface
+### TableReader interface
 
-`SourceOp` depends on this interface, not on any concrete type:
+`SourceOp` depends on this interface and never on a concrete type.
 
 ```go
-// BatchReader is the interface satisfied by FileSource (and BlobSource in future).
-type BatchReader interface {
-    NextBatch() (*batch.Batch, error)
+// TableReader is the interface implemented by FileTableReader and BlobTableReader.
+type TableReader interface {
+    GetNextBatch() (*batch.Batch, error)
     Close() error
 }
 ```
 
-### FileSource
+`GetNextBatch` returns the next dense batch of rows. It returns `(nil, io.EOF)` when the
+sequence is exhausted. Any other error is a hard failure.
 
-`FileSource` implements `BatchReader`. It treats the set of selected CSV files as
-one logical sequence of rows and fills each batch to exactly `batchSize` rows,
-crossing file boundaries as needed. Only the final batch of the entire sequence
-may be smaller.
+### Factory
 
 ```go
-func NewFileSource(typeDir string, typeName string, start, end time.Time, batchSize int) (*FileSource, error)
+// NewTableReader constructs the appropriate TableReader based on entry.Mode.
+// entry.TypeName must be set.
+func NewTableReader(entry *catalog.TableEntry, start, end time.Time, batchSize int) (TableReader, error)
+```
+
+Callers that know the mode at compile time may use the concrete constructors directly.
+
+### FileTableReader
+
+`FileTableReader` treats the set of selected CSV files as one logical sequence of
+rows and fills each batch to exactly `batchSize` rows, crossing file boundaries
+as needed. Only the final batch of the entire sequence may be smaller.
+
+```go
+func NewFileTableReader(typeDir, typeName string, start, end time.Time, batchSize int) (*FileTableReader, error)
 ```
 
 - `typeDir` — the resolved directory for this type (from `TableEntry.Resolve`).
-- `typeName` — stored as the `Origin` in every `ColumnMeta` this source emits.
+- `typeName` — stored as the `Origin` in every `ColumnMeta` this reader emits.
 - `start`, `end` — the resolved time window (zero = open bound).
 - Loads `type.json` from `typeDir` on construction; returns error if missing or
   malformed.
-- Runs file-selection pruning at construction time; stores the ordered file list.
+- Runs entry-selection pruning at construction time; stores the ordered file list.
 - Opens the first file immediately so schema field-count validation happens before
-  any `NextBatch` call.
+  any `GetNextBatch` call.
 
-**Batch size is a configurable parameter** passed to `NewFileSource`. Tests use
-256 rows — small enough to produce multiple batches per testgen file (500 rows)
-and to exercise cross-file batch boundaries, while remaining a realistic value
+**Batch size is a configurable parameter** passed to `NewFileTableReader`. Tests
+use 256 rows — small enough to produce multiple batches per testgen file (500 rows)
+and to exercise cross-entry batch boundaries, while remaining a realistic value
 that needs no special-casing in production code.
 
-### Logical concatenation and row-level filtering
-
-The selected files are logically concatenated into a single ordered row stream.
-`timestamp` is always column 0 (Gobbler prepends it). Row-level timestamp checks
-are applied only to the boundary files:
-
-| Position in selection | Row-level rule |
-|---|---|
-| First file only | Skip rows where `timestamp < start` (leading skip) |
-| Middle files | All rows included — no per-row check |
-| Last file only | Stop when `timestamp > end` (trailing stop) |
-| First == Last (one file) | Both leading skip and trailing stop apply |
-| Open bound (`start` or `end` zero) | The corresponding check is skipped |
-| Full scan `(*)` | No row-level filtering at all |
-
-This means the inner read loop performs a timestamp parse only for rows in the
-boundary files; middle-file rows are appended to the builders without any
-timestamp inspection.
-
-### Internal structure
-
 ```go
-type FileSource struct {
+type FileTableReader struct {
     files       []string        // ordered selected file paths
     fileIdx     int             // index of the currently open file
     file        *os.File        // currently open file handle
@@ -223,12 +211,106 @@ type FileSource struct {
 }
 ```
 
-`columnBuilder` is a small decoding helper:
+### BlobTableReader
+
+`BlobTableReader` is the blob-mode equivalent. It selects blobs by name (same
+naming convention as files) and streams each blob directly as an `io.ReadCloser`
+— no temporary files are created.
+
+```go
+func NewBlobTableReader(accountName, accountKey, container, typeName string, start, end time.Time, batchSize int) (*BlobTableReader, error)
+```
+
+- `container` — the Azure Blob Storage container name (pre-resolved from
+  `TableEntry.StorageBucket`).
+- Reads `type.json` from the container on construction (a blob named `"type.json"`).
+- Lists blobs in the container and applies the same entry-selection pruning as
+  `FileTableReader`.
+- Opens (downloads) the first blob immediately for the same upfront schema
+  validation.
+
+```go
+type BlobTableReader struct {
+    blobs       []string        // ordered selected blob names
+    blobIdx     int             // index of the currently streaming blob
+    stream      io.ReadCloser   // current blob download stream
+    csv         *csv.Reader     // wraps stream
+    schema      *Schema
+    typeName    string
+    batchSize   int
+    start       time.Time
+    end         time.Time
+    colBuilders []columnBuilder
+    client      *azblob.Client  // Azure SDK client; holds account credentials
+    container   string
+    done        bool
+}
+```
+
+### Shared helper functions
+
+`FileTableReader` and `BlobTableReader` share logic through package-private helper
+functions rather than a shared internal interface:
+
+| Helper | Purpose |
+|---|---|
+| `parseSchema(data []byte) (*Schema, error)` | Unmarshal `type.json` bytes |
+| `selectEntries(names []string, start, end time.Time) []string` | Prune entry list to time window |
+| `newColumnBuilders(schema *Schema, batchSize int) []columnBuilder` | Allocate per-column builders |
+| `fillBatch(r *csv.Reader, builders []columnBuilder, batchSize int, isFirst, isLast bool, start, end time.Time) (rows int, done bool, err error)` | Core read loop; applies boundary filtering |
+| `validateFieldCount(schema *Schema, rec []string) error` | First-row field-count check |
+
+### GetNextBatch logic (both implementations)
+
+```
+rows = 0
+loop until rows == batchSize:
+    rec, err = csv.Read()
+    if err == EOF:
+        advance to next entry (file or blob stream)
+        if no next entry: break
+        continue
+    if err != nil: return error
+
+    ts = parse rec[0] as datetime
+    if isFirstEntry and ts < start: continue   // leading skip
+    if isLastEntry  and ts > end:  break       // trailing stop
+
+    for each column: builders[col].Append(rec[col])
+    rows++
+
+if rows == 0: return nil, io.EOF
+call FinalizeColumn(rows) on each builder → assemble Batch{Length: rows, ...}
+call Reset() on each builder
+```
+
+No allocations inside the inner loop. Builders pre-allocate their `values` and
+`nulls` slices once at construction (sized `batchSize` and `(batchSize+63)/64`
+respectively) and reuse them across every batch.
+
+### Logical concatenation and row-level filtering
+
+The selected entries are logically concatenated into a single ordered row stream.
+`timestamp` is always column 0 (Gobbler prepends it). Row-level timestamp checks
+apply only to boundary entries:
+
+| Position in selection | Row-level rule |
+|---|---|
+| First entry only | Skip rows where `timestamp < start` (leading skip) |
+| Middle entries | All rows included — no per-row check |
+| Last entry only | Stop when `timestamp > end` (trailing stop) |
+| First == Last (one entry) | Both leading skip and trailing stop apply |
+| Open bound (`start` or `end` zero) | The corresponding check is skipped |
+| Full scan `(*)` | No row-level filtering at all |
+
+### Column builders
+
+`columnBuilder` is an unexported interface:
 
 ```go
 type columnBuilder interface {
     Append(raw string)
-    Build(n int) batch.ColumnVector
+    FinalizeColumn(n int) batch.ColumnVector
     Reset()
 }
 ```
@@ -242,128 +324,51 @@ Concrete builders: `int32Builder`, `float64Builder`, `stringBuilder`, `boolBuild
 CSV-quoted JSON, so Go's `csv.Reader` automatically unquotes the field before
 `Append` is called — the builder stores a plain JSON string.
 
-### NextBatch logic
-
-``` go
-rows = 0
-loop until rows == batchSize:
-    rec, err = csv.Read()
-    if err == EOF:
-        advance to next file
-        if no next file: break          // end of sequence
-        continue                        // refill from new file
-    if err != nil: return error
-
-    ts = parse rec[0] as datetime
-    if isFirstFile and ts < start: continue   // leading skip
-    if isLastFile  and ts > end:  break       // trailing stop
-
-    for each column: builders[col].Append(rec[col])
-    rows++
-
-if rows == 0: return nil, io.EOF
-build and return Batch{Length: rows, ...}
-reset all builders
-```
-
-No allocations inside the inner loop. Builders pre-allocate their `values` and
-`nulls` slices once at construction (sized `batchSize` and `batchSize/64`
-respectively) and reuse them across every batch.
-
-### Column builders
-
-`int32Builder`:
-
-```go
-type int32Builder struct {
-    values []int32
-    nulls  []uint64
-    idx    int
-}
-
-func (b *int32Builder) Append(raw string) {
-    if raw == "" {
-        setNull(b.nulls, b.idx)
-        b.values[b.idx] = 0
-    } else {
-        v, _ := strconv.ParseInt(raw, 10, 32)
-        b.values[b.idx] = int32(v)
-    }
-    b.idx++
-}
-
-func (b *int32Builder) Build(n int) batch.ColumnVector {
-    return &batch.Int32Vector{Values: b.values[:n], Nulls: b.nulls}
-}
-
-func (b *int32Builder) Reset() { b.idx = 0 }
-```
-
-`stringBuilder` (Phase 1 — raw strings; Phase 2 will use dictionary encoding):
-
-```go
-type stringBuilder struct {
-    values []string
-    nulls  []uint64
-    idx    int
-}
-
-func (b *stringBuilder) Append(raw string) {
-    if raw == "" {
-        setNull(b.nulls, b.idx)
-        b.values[b.idx] = ""
-    } else {
-        b.values[b.idx] = raw
-    }
-    b.idx++
-}
-```
-
 ### Error handling
 
 - **Empty cell** — treated as null for all types (null bit set). Gobbler writes
   `""` for any absent optional field.
 - **Malformed non-empty value** — treated as null in Phase 1 rather than failing.
 - **CSV parse errors** — propagated immediately.
-- **Schema mismatch** — on opening each file, the first data row's field count is
-  compared against `type.json`. If mismatched, returns an error before any row is
-  appended (descriptive: file path, expected count, actual count). This catches
-  stale CSV files left over after a type definition change.
+- **Schema mismatch** — on opening each entry, the first data row's field count is
+  compared against `type.json`. Returns an error before any row is appended
+  (descriptive: entry name, expected count, actual count). This catches
+  stale CSV files or blobs left over after a type definition change.
 
 ---
 
-## 4. File Selection and Time-Range Pruning
+## 4. Entry Selection and Time-Range Pruning
 
-### Filename convention
+### Naming convention
 
-Gobbler names each CSV file after the timestamp of its **first item**:
+Gobbler names each CSV entry (file or blob) after the timestamp of its **first item**:
 
 ```
 2024-01-15_13-22-07.123_logs.csv
 2024-01-15_13-35-41.009_logs.csv
 ```
 
-The `file_timestamp` is the **lower bound** of item timestamps in that file. Items are written in strictly increasing timestamp order, so file ordering by name is reliable.
+The `entry_timestamp` is the **lower bound** of item timestamps in that entry. Items are written in strictly increasing timestamp order within each entry, so ordering by name is reliable.
 
-### File selection rule
+### Entry selection rule
 
-For a query window `[T_start, T_end]`, sort all files in the type's directory by `file_timestamp` ascending:
+For a query window `[T_start, T_end]`, sort all entries in the type's bucket by `entry_timestamp` ascending:
 
-- **First file (N)**: first file where `file_timestamp >= T_start`
-- **Last file (M)**: last file where `file_timestamp <= T_end`
-- **Read**: files N through M inclusive
+- **First entry (N)**: last entry where `entry_timestamp <= T_start` (the entry that was "active" at `T_start`, which may contain rows ≥ `T_start`); if all entries start after `T_start`, N is the first entry overall
+- **Last entry (M)**: last entry where `entry_timestamp <= T_end`; if all entries start after `T_end`, the selection is empty
+- **Read**: entries N through M inclusive
 
-Row-level filtering within the boundary files:
+Row-level filtering within the boundary entries:
 
-| File | Rule |
+| Entry | Rule |
 |---|---|
-| File N | Skip rows where `timestamp < T_start` |
-| Files N+1 … M-1 | All rows pass — no per-row check needed |
-| File M | Skip rows where `timestamp > T_end` |
+| Entry N | Skip rows where `timestamp < T_start` |
+| Entries N+1 … M-1 | All rows pass — no per-row check needed |
+| Entry M | Skip rows where `timestamp > T_end` |
 
-File selection is pure I/O optimisation. The `FilterOp` predicate is still the source of truth for correctness.
+Entry selection is pure I/O optimisation. The `FilterOp` predicate is still the source of truth for correctness.
 
-**Owner**: `source/pruning.go`. `FileSource` applies this rule; the planner extracts `[T_start, T_end]` from the `TimeWindow` AST node and passes it into `SourceOp` at construction time.
+**Owner**: `source/pruning.go`. Both `FileTableReader` and `BlobTableReader` apply this rule; the planner extracts `[T_start, T_end]` from the `TimeWindow` AST node and passes it into `SourceOp` at construction time.
 
 ### Time window forms
 
@@ -371,9 +376,9 @@ Every source requires an explicit time window — it is part of the `Source` syn
 
 | Form | Example | Meaning |
 |---|---|---|
-| Relative lookback | `Logs(last 24h)` | All files from `now() − 24h` onward |
-| Absolute range | `Logs(datetime(2026-01-15 09:00:00) .. datetime(2026-01-15 18:00:00))` | Files overlapping the given range |
-| Full scan | `Logs(*)` | All files — no time filter |
+| Relative lookback | `Logs(last 24h)` | All entries from `now() − 24h` onward |
+| Absolute range | `Logs(datetime(2026-01-15 09:00:00) .. datetime(2026-01-15 18:00:00))` | Entries overlapping the given range |
+| Full scan | `Logs(*)` | All entries — no time filter |
 
 **`DatetimeLit` format** — Gobbler's native format: `YYYY-MM-DD HH:MM:SS.mmm` (space separator, no `T`, no timezone designator). Time part and milliseconds are optional:
 
@@ -383,9 +388,9 @@ datetime(2026-01-15 09:30:00)
 datetime(2026-01-15 09:30:00.000)
 ```
 
-**`last <duration>`** — the planner computes `T_start = now() − duration` at query start time. No upper-bound file pruning is applied for this form.
+**`last <duration>`** — the planner computes `T_start = now() − duration` at query start time. No upper-bound entry pruning is applied for this form.
 
-**`*` (full scan)** — all files in the type's directory/container are read. Requiring the literal `*` rather than allowing a bare source name makes the cost intentionally visible in the query text.
+**`*` (full scan)** — all entries in the type's bucket are read. Requiring the literal `*` rather than allowing a bare source name makes the cost intentionally visible in the query text.
 
 In blob mode every matching blob must be opened and downloaded. Use narrow windows for large types.
 

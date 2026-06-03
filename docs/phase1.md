@@ -33,7 +33,7 @@ Execution pipeline consumes **batches** produced directly from CSV files.
 1. **Lexer + Parser** (based on your grammar)
 2. **Logical plan builder**
 3. **Physical plan builder**
-4. **CSVBatchReader** (your "pseudo-segment reader")
+4. **TableReader** (reads table representation and return batches)
 5. **Operators**:
    - Filter
    - Project
@@ -42,9 +42,9 @@ Execution pipeline consumes **batches** produced directly from CSV files.
    - Sort (local)
    - Take
    - Count (sugar for summarize count())
-6. **Batch model** (4096 rows, typed column vectors)
+6. **Batch model** (configurable number of rows, typed column vectors)
 7. **Execution engine** (pull-based)
-8. **StorageRoot** (resolves type names to data paths before physical plan construction)
+8. **StorageCatalog** (resolves type names to data paths before physical plan construction)
 
 This gives you a fully working analytical engine.
 
