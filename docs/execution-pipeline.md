@@ -88,7 +88,7 @@ Every operator implements a two-method pull-based interface:
 ```go
 package physical
 
-import "gobbler-query/query/batch"
+import "github.com/kozwoj/gobbler-query/query/batch"
 
 type Operator interface {
     Next() (*batch.Batch, error)
@@ -103,19 +103,27 @@ type Operator interface {
 ## 3. Operator Catalogue
 
 ### SourceOp
+Stage implemented: `source` stage (`LogicalSource`).
+
 Wraps the batch reader. Root of every plan.
 
 ```go
 type SourceOp struct {
-    reader source.BatchReader
+    reader source.TableReader
 }
 
 func (op *SourceOp) Next() (*batch.Batch, error) {
-    return op.reader.NextBatch()
+    return op.reader.GetNextBatch()
+}
+
+func (op *SourceOp) Close() error {
+    return op.reader.Close()
 }
 ```
 
 ### FilterOp
+Stage implemented: `where` stage (`LogicalWhere`).
+
 Evaluates a compiled `BoolExpr` row-by-row and **compacts** the passing rows
 into a new `*Batch` with fresh column vectors. The output is always a dense batch
 with `Length` equal to the number of passing rows.
@@ -128,6 +136,8 @@ type FilterOp struct {
 ```
 
 ### ProjectOp
+Stage implemented: `project` stage (`LogicalProject`).
+
 Evaluates scalar expressions and produces new column vectors.
 
 ```go
@@ -139,6 +149,8 @@ type ProjectOp struct {
 ```
 
 ### HashAggregateOp
+Stage implemented: `summarize` stage (`LogicalSummarize`).
+
 Consumes all input batches, updates a `map[GroupKey]*AggState`, then emits one final batch.
 
 ```go
@@ -152,6 +164,8 @@ type HashAggregateOp struct {
 ```
 
 ### HashJoinOp
+Stage implemented: `join` stage (`LogicalJoin`).
+
 Build side loads the right subquery into a hash table; probe side streams the left source through it.
 
 ```go
@@ -166,6 +180,8 @@ type HashJoinOp struct {
 ```
 
 ### SortOp
+Stage implemented: `sort` stage (`LogicalSort`).
+
 Materialises all rows from input, sorts, then emits sorted batches.
 
 ```go
@@ -178,6 +194,8 @@ type SortOp struct {
 ```
 
 ### LimitOp
+Stage implemented: `take` stage (`LogicalTake`).
+
 Passes through batches until `remaining` rows have been emitted.
 
 ```go
@@ -188,6 +206,8 @@ type LimitOp struct {
 ```
 
 ### CountOp
+Stage implemented: `count` stage (`LogicalCount`).
+
 Sugar for `summarize count()`. Accumulates a counter across all input batches, emits one row.
 
 ```go
@@ -222,7 +242,7 @@ The logical plan is a direct structural mirror of the AST — one node per gramm
 
 | Logical node | Physical operator | Notes |
 |---|---|---|
-| `LogicalSource` | `SourceOp` | Wraps `FileSource` or `BlobSource` |
+| `LogicalSource` | `SourceOp` | Wraps `source.TableReader` (file or blob) |
 | `LogicalWhere` | `FilterOp` | Compiled `BoolExpr` |
 | `LogicalProject` | `ProjectOp` | Compiled scalar expressions |
 | `LogicalSummarize` | `HashAggregateOp` | Hash table + agg state |
@@ -233,44 +253,64 @@ The logical plan is a direct structural mirror of the AST — one node per gramm
 
 ### Physical plan builder
 
+The builder lives in `package planner` and imports `logical`, `physical`, `source`, `catalog`, and `expr`.
+
 ```go
-func buildPhysical(node LogicalNode, root catalog.StorageRoot) (physical.Operator, error) {
+// batchSize is passed down to every SourceOp so all readers in a query share
+// the same buffer size.
+func buildPhysical(
+    node    logical.LogicalNode,
+    cat     catalog.Catalog,
+    batchSize int,
+) (physical.Operator, error) {
     switch n := node.(type) {
 
-    case *LogicalSource:
-        path, err := root.Resolve(n.TypeName)
+    case *logical.LogicalSource:
+        entry, ok := cat[n.TypeName]
+        if !ok {
+            return nil, fmt.Errorf("unknown table %q", n.TypeName)
+        }
+        reader, err := source.NewTableReader(entry, n.Start, n.End, batchSize)
         if err != nil {
             return nil, err
         }
-        return newSourceOp(path, n.TimeWindow), nil
+        return &physical.SourceOp{Reader: reader}, nil
 
-    case *LogicalWhere:
-        child, _ := buildPhysical(n.Input, root)
-        return &physical.FilterOp{Input: child, Expr: expr.CompileBoolExpr(n.Expr)}, nil
+    case *logical.LogicalWhere:
+        child, err := buildPhysical(n.Input, cat, batchSize)
+        if err != nil { return nil, err }
+        return &physical.FilterOp{Input: child, Expr: expr.CompileBoolExpr(n.Pred)}, nil
 
-    case *LogicalProject:
-        child, _ := buildPhysical(n.Input, root)
+    case *logical.LogicalProject:
+        child, err := buildPhysical(n.Input, cat, batchSize)
+        if err != nil { return nil, err }
         return &physical.ProjectOp{Input: child, Items: expr.CompileProjectItems(n.Items)}, nil
 
-    case *LogicalSummarize:
-        child, _ := buildPhysical(n.Input, root)
+    case *logical.LogicalSummarize:
+        child, err := buildPhysical(n.Input, cat, batchSize)
+        if err != nil { return nil, err }
         return physical.NewHashAggregateOp(child, expr.CompileAggFuncs(n.Aggs), expr.CompileGroupBy(n.GroupBy)), nil
 
-    case *LogicalJoin:
-        left, _ := buildPhysical(n.Left, root)
-        right, _ := buildPhysical(n.Right, root)
+    case *logical.LogicalJoin:
+        left, err := buildPhysical(n.Left, cat, batchSize)
+        if err != nil { return nil, err }
+        right, err := buildPhysical(n.Right, cat, batchSize)
+        if err != nil { return nil, err }
         return physical.NewHashJoinOp(left, right, expr.CompileJoinKeys(n.Keys)), nil
 
-    case *LogicalSort:
-        child, _ := buildPhysical(n.Input, root)
+    case *logical.LogicalSort:
+        child, err := buildPhysical(n.Input, cat, batchSize)
+        if err != nil { return nil, err }
         return physical.NewSortOp(child, expr.CompileSortItems(n.Items)), nil
 
-    case *LogicalTake:
-        child, _ := buildPhysical(n.Input, root)
-        return &physical.LimitOp{Input: child, Remaining: n.N}, nil
+    case *logical.LogicalTake:
+        child, err := buildPhysical(n.Input, cat, batchSize)
+        if err != nil { return nil, err }
+        return &physical.LimitOp{Input: child, Remaining: int(n.Count)}, nil
 
-    case *LogicalCount:
-        child, _ := buildPhysical(n.Input, root)
+    case *logical.LogicalCount:
+        child, err := buildPhysical(n.Input, cat, batchSize)
+        if err != nil { return nil, err }
         return &physical.CountOp{Input: child}, nil
     }
 

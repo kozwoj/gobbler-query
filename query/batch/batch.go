@@ -30,6 +30,9 @@ type ColumnVector interface {
 // Nulls is a packed bitset: bit i set means row i is null.
 // Each concrete vector embeds this helper.
 func isNull(nulls []uint64, i int) bool {
+	if len(nulls) == 0 {
+		return false
+	}
 	return nulls[i/64]>>(uint(i)%64)&1 == 1
 }
 
@@ -42,6 +45,16 @@ type Int32Vector struct {
 func (v *Int32Vector) Len() int          { return len(v.Values) }
 func (v *Int32Vector) IsNull(i int) bool { return isNull(v.Nulls, i) }
 func (v *Int32Vector) columnVector()     {}
+
+// Int64Vector holds a column of int64 values.
+type Int64Vector struct {
+	Values []int64
+	Nulls  []uint64
+}
+
+func (v *Int64Vector) Len() int          { return len(v.Values) }
+func (v *Int64Vector) IsNull(i int) bool { return isNull(v.Nulls, i) }
+func (v *Int64Vector) columnVector()     {}
 
 // Float64Vector holds a column of float64 values.
 type Float64Vector struct {
