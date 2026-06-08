@@ -16,6 +16,7 @@ const (
 	TypeDatetime
 	TypeTimespan // Go duration string, e.g. "1h10m10s"; stored as time.Duration
 	TypeDynamic  // opaque; stored as unquoted JSON string
+	TypeInt64    // not a native Gobbler source type; produced by arithmetic and aggregation
 )
 
 // ColumnSchema describes a single column's name and type.

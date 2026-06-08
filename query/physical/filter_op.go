@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/kozwoj/gobbler-query/query/batch"
@@ -38,7 +39,7 @@ func (op *FilterOp) Next() (*batch.Batch, error) {
 			continue // all rows filtered; pull next batch
 		}
 
-		return compact(b, passing), nil
+		return compact(b, passing)
 	}
 }
 
@@ -50,19 +51,23 @@ func (op *FilterOp) Close() error {
 }
 
 // compact builds a new batch containing only the rows at indices passing.
-func compact(src *batch.Batch, passing []int) *batch.Batch {
+func compact(src *batch.Batch, passing []int) (*batch.Batch, error) {
 	cols := make([]batch.ColumnVector, len(src.Columns))
 	for i, col := range src.Columns {
-		cols[i] = compactColumn(col, passing)
+		var err error
+		cols[i], err = compactColumn(col, passing)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &batch.Batch{
 		Length:  len(passing),
 		Schema:  src.Schema,
 		Columns: cols,
-	}
+	}, nil
 }
 
-func compactColumn(col batch.ColumnVector, passing []int) batch.ColumnVector {
+func compactColumn(col batch.ColumnVector, passing []int) (batch.ColumnVector, error) {
 	n := len(passing)
 	switch v := col.(type) {
 	case *batch.Int32Vector:
@@ -70,51 +75,51 @@ func compactColumn(col batch.ColumnVector, passing []int) batch.ColumnVector {
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.Int32Vector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.Int32Vector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.Int64Vector:
 		vals := make([]int64, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.Int64Vector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.Int64Vector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.Float64Vector:
 		vals := make([]float64, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.Float64Vector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.Float64Vector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.StringVector:
 		vals := make([]string, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.StringVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.StringVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.BoolVector:
 		vals := make([]bool, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.BoolVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.BoolVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.DatetimeVector:
 		vals := make([]time.Time, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.DatetimeVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.DatetimeVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.TimespanVector:
 		vals := make([]time.Duration, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.TimespanVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.TimespanVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	case *batch.DynamicVector:
 		vals := make([]string, n)
 		for j, i := range passing {
 			vals[j] = v.Values[i]
 		}
-		return &batch.DynamicVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}
+		return &batch.DynamicVector{Values: vals, Nulls: compactNulls(v.Nulls, passing)}, nil
 	default:
-		return col
+		return nil, fmt.Errorf("filter: unsupported column type %T", col)
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 type LimitOp struct {
 	Input     Operator
 	Remaining int
-	emitted   int
 	closed    bool
 }
 
@@ -42,36 +41,19 @@ func (op *LimitOp) Next() (*batch.Batch, error) {
 	}
 
 	if keep < b.Length {
-		b2 := *b
-		b2.Length = keep
-		b2.Columns = make([]batch.ColumnVector, len(b.Columns))
-		for i, col := range b.Columns {
-			switch v := col.(type) {
-			case *batch.Int32Vector:
-				b2.Columns[i] = &batch.Int32Vector{Values: v.Values[:keep]}
-			case *batch.Int64Vector:
-				b2.Columns[i] = &batch.Int64Vector{Values: v.Values[:keep]}
-			case *batch.Float64Vector:
-				b2.Columns[i] = &batch.Float64Vector{Values: v.Values[:keep]}
-			case *batch.StringVector:
-				b2.Columns[i] = &batch.StringVector{Values: v.Values[:keep]}
-			case *batch.BoolVector:
-				b2.Columns[i] = &batch.BoolVector{Values: v.Values[:keep]}
-			case *batch.DatetimeVector:
-				b2.Columns[i] = &batch.DatetimeVector{Values: v.Values[:keep]}
-			case *batch.TimespanVector:
-				b2.Columns[i] = &batch.TimespanVector{Values: v.Values[:keep]}
-			case *batch.DynamicVector:
-				b2.Columns[i] = &batch.DynamicVector{Values: v.Values[:keep]}
-			default:
-				b2.Columns[i] = col
-			}
+		// Build passing index slice [0, 1, ..., keep-1] and reuse compact.
+		passing := make([]int, keep)
+		for i := range passing {
+			passing[i] = i
 		}
-		b = &b2
+		truncated, err := compact(b, passing)
+		if err != nil {
+			return nil, err
+		}
+		b = truncated
 	}
 
 	op.Remaining -= keep
-	op.emitted += keep
 	return b, nil
 }
 

@@ -157,9 +157,146 @@ func evalScalar(e ast.ScalarExpr, b *batch.Batch, row int) (any, bool, error) {
 	case *ast.AgoExpr:
 		return time.Now().Add(-s.Duration.Duration), false, nil
 
+	case *ast.BinaryExpr:
+		lv, lNull, err := evalScalar(s.Left, b, row)
+		if err != nil {
+			return nil, false, err
+		}
+		rv, rNull, err := evalScalar(s.Right, b, row)
+		if err != nil {
+			return nil, false, err
+		}
+		if lNull || rNull {
+			return nil, true, nil
+		}
+		result, err := applyBinaryOp(lv, s.Op, rv)
+		return result, false, err
+
+	case *ast.UnaryMinusExpr:
+		v, isNull, err := evalScalar(s.Expr, b, row)
+		if err != nil {
+			return nil, false, err
+		}
+		if isNull {
+			return nil, true, nil
+		}
+		result, err := applyUnaryMinus(v)
+		return result, false, err
+
 	default:
 		return nil, false, fmt.Errorf("expr: unsupported ScalarExpr type %T", e)
 	}
+}
+
+// applyBinaryOp evaluates lv op rv at runtime.
+// int32 values are normalised to int64 before dispatch.
+func applyBinaryOp(lv any, op ast.BinaryOp, rv any) (any, error) {
+	if v, ok := lv.(int32); ok {
+		lv = int64(v)
+	}
+	if v, ok := rv.(int32); ok {
+		rv = int64(v)
+	}
+
+	switch l := lv.(type) {
+	case int64:
+		switch r := rv.(type) {
+		case int64:
+			switch op {
+			case ast.BinAdd:
+				return l + r, nil
+			case ast.BinSub:
+				return l - r, nil
+			case ast.BinMul:
+				return l * r, nil
+			case ast.BinDiv:
+				if r == 0 {
+					return nil, fmt.Errorf("expr: integer division by zero")
+				}
+				return l / r, nil
+			}
+		case float64:
+			return applyBinaryOp(float64(l), op, r)
+		}
+	case float64:
+		switch r := rv.(type) {
+		case float64:
+			switch op {
+			case ast.BinAdd:
+				return l + r, nil
+			case ast.BinSub:
+				return l - r, nil
+			case ast.BinMul:
+				return l * r, nil
+			case ast.BinDiv:
+				if r == 0 {
+					return nil, fmt.Errorf("expr: float division by zero")
+				}
+				return l / r, nil
+			}
+		case int64:
+			return applyBinaryOp(l, op, float64(r))
+		}
+	case time.Time:
+		switch r := rv.(type) {
+		case time.Time:
+			if op == ast.BinSub {
+				return l.Sub(r), nil
+			}
+		case time.Duration:
+			switch op {
+			case ast.BinAdd:
+				return l.Add(r), nil
+			case ast.BinSub:
+				return l.Add(-r), nil
+			}
+		}
+	case time.Duration:
+		switch r := rv.(type) {
+		case time.Duration:
+			switch op {
+			case ast.BinAdd:
+				return l + r, nil
+			case ast.BinSub:
+				return l - r, nil
+			}
+		case int64:
+			switch op {
+			case ast.BinMul:
+				return l * time.Duration(r), nil
+			case ast.BinDiv:
+				if r == 0 {
+					return nil, fmt.Errorf("expr: division by zero")
+				}
+				return l / time.Duration(r), nil
+			}
+		case float64:
+			switch op {
+			case ast.BinMul:
+				return time.Duration(float64(l) * r), nil
+			case ast.BinDiv:
+				if r == 0 {
+					return nil, fmt.Errorf("expr: division by zero")
+				}
+				return time.Duration(float64(l) / r), nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("expr: no binary rule for %T %v %T", lv, op, rv)
+}
+
+func applyUnaryMinus(v any) (any, error) {
+	switch n := v.(type) {
+	case int32:
+		return -n, nil
+	case int64:
+		return -n, nil
+	case float64:
+		return -n, nil
+	case time.Duration:
+		return -n, nil
+	}
+	return nil, fmt.Errorf("expr: unary minus not applicable to %T", v)
 }
 
 func compileCompare(e *ast.CompareExpr) RowPredicate {

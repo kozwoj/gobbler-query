@@ -148,6 +148,20 @@ type ProjectOp struct {
 }
 ```
 
+GQL is a subset of KQL and in KQL projection is more than just selection of columns for the next stage. The ProjectOp is designs to:  
+- Selects which columns survive
+- Computes new columns
+- Renames columns
+- Reorders columns
+- Drops everything not listed
+
+The new columns can be computed using `alias = expression` clause of the language. 
+```
+ProjectStage ::= "project" ProjectItem ( "," ProjectItem )*
+ProjectItem  ::= Identifier "=" ScalarExpr     (* alias = expression *)
+               | FieldRef                       (* bare column reference *)
+```
+
 ### HashAggregateOp
 Stage implemented: `summarize` stage (`LogicalSummarize`).
 
