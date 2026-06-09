@@ -25,7 +25,7 @@ func (op *ProjectOp) Next() (*batch.Batch, error) {
 
 	for i, item := range op.Items {
 		schema[i] = batch.ColumnMeta{Name: item.Name, Origin: item.Origin}
-		col, err := evalProjectColumn(item.Eval, b)
+		col, err := evalProjectColumn(item.Eval, vecKindFromColumnType(item.Type), b)
 		if err != nil {
 			return nil, err
 		}
@@ -43,7 +43,8 @@ func (op *ProjectOp) Close() error {
 }
 
 // evalProjectColumn evaluates eval for every row of b and returns a typed ColumnVector.
-func evalProjectColumn(eval expr.ScalarEval, b *batch.Batch) (batch.ColumnVector, error) {
+// kind is used to produce the correct all-null vector when every row evaluates to null.
+func evalProjectColumn(eval expr.ScalarEval, kind vecKind, b *batch.Batch) (batch.ColumnVector, error) {
 	n := b.Length
 	vals := make([]any, n)
 	nullFlags := make([]bool, n)
@@ -55,13 +56,13 @@ func evalProjectColumn(eval expr.ScalarEval, b *batch.Batch) (batch.ColumnVector
 		vals[row] = v
 		nullFlags[row] = isNull
 	}
-	return buildVector(vals, nullFlags), nil
+	return buildVectorTyped(vals, nullFlags, kind), nil
 }
 
-// buildVector creates a typed ColumnVector from a slice of any values.
+// buildVectorTyped creates a typed ColumnVector from a slice of any values.
 // The concrete vector type is inferred from the first non-null value.
-// If all values are null, a StringVector with all-null bits is returned.
-func buildVector(vals []any, nullFlags []bool) batch.ColumnVector {
+// When all values are null, kind determines the output vector type.
+func buildVectorTyped(vals []any, nullFlags []bool, kind vecKind) batch.ColumnVector {
 	for i, v := range vals {
 		if nullFlags[i] {
 			continue
@@ -83,8 +84,8 @@ func buildVector(vals []any, nullFlags []bool) batch.ColumnVector {
 			return buildTimespanVector(vals, nullFlags)
 		}
 	}
-	// all null — type unknown; use StringVector as a placeholder
-	return &batch.StringVector{Values: make([]string, len(vals)), Nulls: packNullBits(nullFlags)}
+	// all null — use the known kind to build the correctly-typed vector
+	return emptyTypedVector(kind, len(vals), packNullBits(nullFlags))
 }
 
 func buildInt32Vector(vals []any, nullFlags []bool) batch.ColumnVector {

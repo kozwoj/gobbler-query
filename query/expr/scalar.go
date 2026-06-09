@@ -3,6 +3,7 @@ package expr
 import (
 	"github.com/kozwoj/gobbler-query/query/ast"
 	"github.com/kozwoj/gobbler-query/query/batch"
+	"github.com/kozwoj/gobbler-query/query/source"
 )
 
 // ScalarEval evaluates a compiled scalar expression for one row of a batch.
@@ -19,9 +20,11 @@ func CompileScalar(e ast.ScalarExpr) ScalarEval {
 }
 
 // CompiledProjectItem describes one output column produced by a project stage.
-// Name and Origin are determined by InferAndValidate before plan construction.
+// Name, Origin, and Type are determined by InferAndValidate before plan construction.
+// The planner converts Type to the appropriate vecKind when building the ProjectOp.
 type CompiledProjectItem struct {
 	Name   string
-	Origin string    // "" for computed columns
+	Origin string            // "" for computed columns
+	Type   source.ColumnType // used to build correctly-typed all-null vectors
 	Eval   ScalarEval
 }

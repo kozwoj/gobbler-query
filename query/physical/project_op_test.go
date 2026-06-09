@@ -8,6 +8,7 @@ import (
 	"github.com/kozwoj/gobbler-query/query/ast"
 	"github.com/kozwoj/gobbler-query/query/batch"
 	"github.com/kozwoj/gobbler-query/query/expr"
+	"github.com/kozwoj/gobbler-query/query/source"
 )
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -31,7 +32,7 @@ func projectOp(input Operator, items ...expr.CompiledProjectItem) *ProjectOp {
 	return &ProjectOp{Input: input, Items: items}
 }
 
-func fieldItem(alias, col, origin string) expr.CompiledProjectItem {
+func fieldItem(alias, col, origin string, ct source.ColumnType) expr.CompiledProjectItem {
 	ref := ast.FieldRef{Name: col}
 	name := col
 	if alias != "" {
@@ -40,6 +41,7 @@ func fieldItem(alias, col, origin string) expr.CompiledProjectItem {
 	return expr.CompiledProjectItem{
 		Name:   name,
 		Origin: origin,
+		Type:   ct,
 		Eval:   expr.CompileScalar(&ast.FieldRefExpr{Ref: ref}),
 	}
 }
@@ -49,7 +51,7 @@ func fieldItem(alias, col, origin string) expr.CompiledProjectItem {
 func TestProjectOp_BareRef_KeepsColumn(t *testing.T) {
 	b := twoColBatch()
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		fieldItem("", "code", "req"),
+		fieldItem("", "code", "req", source.TypeInt32),
 	)
 
 	got, err := op.Next()
@@ -76,7 +78,7 @@ func TestProjectOp_BareRef_KeepsColumn(t *testing.T) {
 func TestProjectOp_Rename_ChangesNamePreservesOrigin(t *testing.T) {
 	b := twoColBatch()
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		fieldItem("statusCode", "code", "req"),
+		fieldItem("statusCode", "code", "req", source.TypeInt32),
 	)
 
 	got, err := op.Next()
@@ -108,7 +110,7 @@ func TestProjectOp_Compute_IntAddition(t *testing.T) {
 		Right: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "b"}},
 	}
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		expr.CompiledProjectItem{Name: "total", Origin: "", Eval: expr.CompileScalar(sumExpr)},
+		expr.CompiledProjectItem{Name: "total", Origin: "", Type: source.TypeInt64, Eval: expr.CompileScalar(sumExpr)},
 	)
 
 	got, err := op.Next()
@@ -141,7 +143,7 @@ func TestProjectOp_Compute_DatetimeSubtract_YieldsTimespan(t *testing.T) {
 		Right: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "start"}},
 	}
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		expr.CompiledProjectItem{Name: "dur", Origin: "", Eval: expr.CompileScalar(durExpr)},
+		expr.CompiledProjectItem{Name: "dur", Origin: "", Type: source.TypeTimespan, Eval: expr.CompileScalar(durExpr)},
 	)
 
 	got, err := op.Next()
@@ -159,8 +161,8 @@ func TestProjectOp_Compute_DatetimeSubtract_YieldsTimespan(t *testing.T) {
 func TestProjectOp_MultipleItems_ReorderColumns(t *testing.T) {
 	b := twoColBatch()
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		fieldItem("", "region", "req"),
-		fieldItem("", "code", "req"),
+		fieldItem("", "region", "req", source.TypeString),
+		fieldItem("", "code", "req", source.TypeInt32),
 	)
 
 	got, err := op.Next()
@@ -196,7 +198,7 @@ func TestProjectOp_NullRow_PropagatedFromFieldRef(t *testing.T) {
 		},
 	}
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		fieldItem("", "code", "t"),
+		fieldItem("", "code", "t", source.TypeInt32),
 	)
 
 	got, err := op.Next()
@@ -232,7 +234,7 @@ func TestProjectOp_NullRow_PropagatedInBinaryExpr(t *testing.T) {
 		Right: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "b"}},
 	}
 	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
-		expr.CompiledProjectItem{Name: "sum", Origin: "", Eval: expr.CompileScalar(sumExpr)},
+		expr.CompiledProjectItem{Name: "sum", Origin: "", Type: source.TypeInt64, Eval: expr.CompileScalar(sumExpr)},
 	)
 
 	got, err := op.Next()
@@ -255,7 +257,7 @@ func TestProjectOp_NullRow_PropagatedInBinaryExpr(t *testing.T) {
 
 func TestProjectOp_EOF_PropagatesFromInput(t *testing.T) {
 	op := projectOp(&fakeOperator{batches: nil},
-		fieldItem("", "code", "t"),
+		fieldItem("", "code", "t", source.TypeInt32),
 	)
 	_, err := op.Next()
 	if err != io.EOF {
@@ -268,5 +270,32 @@ func TestProjectOp_Close_Delegates(t *testing.T) {
 	op := &ProjectOp{Input: input}
 	if err := op.Close(); err != io.ErrUnexpectedEOF {
 		t.Errorf("Close() = %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestProjectOp_AllNull_ProducesCorrectVectorType(t *testing.T) {
+	// All 3 rows are null in an int32 column.
+	nulls := []uint64{0b0111} // bits 0,1,2 set
+	b := &batch.Batch{
+		Length: 3,
+		Schema: []batch.ColumnMeta{{Name: "code", Origin: "t"}},
+		Columns: []batch.ColumnVector{
+			&batch.Int32Vector{Values: []int32{0, 0, 0}, Nulls: nulls},
+		},
+	}
+	op := projectOp(&fakeOperator{batches: []*batch.Batch{b}},
+		fieldItem("", "code", "t", source.TypeInt32),
+	)
+	got, err := op.Next()
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if _, ok := got.Columns[0].(*batch.Int32Vector); !ok {
+		t.Errorf("all-null column type = %T, want *batch.Int32Vector", got.Columns[0])
+	}
+	for i := 0; i < 3; i++ {
+		if !got.Columns[0].IsNull(i) {
+			t.Errorf("row %d IsNull = false, want true", i)
+		}
 	}
 }
