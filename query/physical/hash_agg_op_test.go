@@ -19,7 +19,7 @@ func aggOp(input Operator, byColName string, byColType source.ColumnType, aggs .
 	return &HashAggregateOp{
 		Input: input,
 		Aggs:  aggs,
-		GroupBy: []groupByCol{{
+		GroupBy: []GroupByCol{{
 			Name: byColName,
 			Type: byColType,
 			Eval: expr.CompileScalar(&ast.FieldRefExpr{Ref: ast.FieldRef{Name: byColName}}),
@@ -336,7 +336,7 @@ func TestHashAggOp_BatchSize_Respected(t *testing.T) {
 	op := &HashAggregateOp{
 		Input:     &fakeOperator{batches: []*batch.Batch{b}},
 		Aggs:      []expr.CompiledAggItem{countItem("n")},
-		GroupBy:   []groupByCol{{Name: "region", Type: source.TypeString, Eval: expr.CompileScalar(&ast.FieldRefExpr{Ref: ast.FieldRef{Name: "region"}})}},
+		GroupBy:   []GroupByCol{{Name: "region", Type: source.TypeString, Eval: expr.CompileScalar(&ast.FieldRefExpr{Ref: ast.FieldRef{Name: "region"}})}},
 		BatchSize: 2,
 	}
 	batches := collectAll(t, op)
@@ -411,7 +411,7 @@ func TestHashAggOp_DatetimeGroupBy(t *testing.T) {
 	op := &HashAggregateOp{
 		Input: &fakeOperator{batches: []*batch.Batch{b}},
 		Aggs:  []expr.CompiledAggItem{countItem("n")},
-		GroupBy: []groupByCol{{
+		GroupBy: []GroupByCol{{
 			Name: "ts",
 			Type: source.TypeDatetime,
 			Eval: expr.CompileScalar(&ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ts"}}),

@@ -18,7 +18,7 @@ import (
 type HashAggregateOp struct {
 	Input     Operator
 	Aggs      []expr.CompiledAggItem // aggregation output columns
-	GroupBy   []groupByCol           // group-by columns
+	GroupBy   []GroupByCol           // group-by columns
 	BatchSize int                    // rows per output batch; defaults to defaultSortBatchSize
 
 	// populated on first Next()
@@ -26,9 +26,9 @@ type HashAggregateOp struct {
 	offset int
 }
 
-// groupByCol describes one group-by column: its index in the input schema and
+// GroupByCol describes one group-by column: its index in the input schema and
 // the eval function to extract its value from a batch row.
-type groupByCol struct {
+type GroupByCol struct {
 	Name   string
 	Origin string
 	Type   source.ColumnType
@@ -88,7 +88,7 @@ func (op *HashAggregateOp) aggregate() error {
 			// Evaluate group-by columns for this row.
 			byVals := make([]any, len(op.GroupBy))
 			byNulls := make([]bool, len(op.GroupBy))
-			for i, gc := range op.GroupBy {
+		for i, gc := range op.GroupBy {
 				v, null, err := gc.Eval(b, row)
 				if err != nil {
 					return err

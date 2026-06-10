@@ -3,6 +3,8 @@ package source
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
 // ColumnType identifies the data type of a column.
@@ -68,4 +70,14 @@ func parseSchema(data []byte) (*Schema, error) {
 		cols[i] = ColumnSchema{Name: c.Name, Type: ct}
 	}
 	return &Schema{Columns: cols}, nil
+}
+
+// LoadSchema reads and parses the type.json file found in typeDir.
+// typeDir is the resolved directory for the table (e.g. OutputDir/StorageBucket).
+func LoadSchema(typeDir string) (*Schema, error) {
+	data, err := os.ReadFile(filepath.Join(typeDir, "type.json"))
+	if err != nil {
+		return nil, fmt.Errorf("LoadSchema: read type.json in %q: %w", typeDir, err)
+	}
+	return parseSchema(data)
 }

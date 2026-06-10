@@ -8,10 +8,10 @@ import (
 	"github.com/kozwoj/gobbler-query/query/batch"
 )
 
-// compiledSortKey records which column drives a sort level and the direction.
-type compiledSortKey struct {
-	colIdx int
-	desc   bool
+// CompiledSortKey records which column drives a sort level and the direction.
+type CompiledSortKey struct {
+	ColIdx int
+	Desc   bool
 }
 
 // compareAny returns -1, 0, or +1.
@@ -96,18 +96,18 @@ func compareAny(a, b any, aNull, bNull bool) int {
 func compareRows(
 	rowA, rowB []any,
 	nullsA, nullsB []bool,
-	keys []compiledSortKey,
+	keys []CompiledSortKey,
 ) bool {
 	for _, k := range keys {
-		aN := nullsA[k.colIdx]
-		bN := nullsB[k.colIdx]
-		cmp := compareAny(rowA[k.colIdx], rowB[k.colIdx], aN, bN)
+		aN := nullsA[k.ColIdx]
+		bN := nullsB[k.ColIdx]
+		cmp := compareAny(rowA[k.ColIdx], rowB[k.ColIdx], aN, bN)
 		if cmp == 0 {
 			continue
 		}
 		// Apply desc only when both values are non-null.
 		// Null ordering is position-independent of direction.
-		if k.desc && !aN && !bN {
+		if k.Desc && !aN && !bN {
 			cmp = -cmp
 		}
 		if cmp < 0 {
@@ -126,7 +126,7 @@ const defaultSortBatchSize = 512
 // and then emits rows in sorted order one batch at a time.
 type SortOp struct {
 	Input     Operator
-	Keys      []compiledSortKey
+	Keys      []CompiledSortKey
 	BatchSize int // rows per output batch; defaults to defaultSortBatchSize
 
 	rows   *materializedRows

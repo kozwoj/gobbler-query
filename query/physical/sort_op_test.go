@@ -103,7 +103,7 @@ func makeRow(vals ...any) ([]any, []bool) {
 func TestCompareRows_SingleKeyAsc(t *testing.T) {
 	a, aN := makeRow(int32(1))
 	b, bN := makeRow(int32(2))
-	keys := []compiledSortKey{{colIdx: 0, desc: false}}
+	keys := []CompiledSortKey{{ColIdx: 0, Desc: false}}
 	if !compareRows(a, b, aN, bN, keys) {
 		t.Error("1 < 2 asc: expected true")
 	}
@@ -115,17 +115,17 @@ func TestCompareRows_SingleKeyAsc(t *testing.T) {
 func TestCompareRows_SingleKeyDesc(t *testing.T) {
 	a, aN := makeRow(int32(1))
 	b, bN := makeRow(int32(2))
-	keys := []compiledSortKey{{colIdx: 0, desc: true}}
-	// desc: larger value sorts first, so 2 < 1 in desc order
+	keys := []CompiledSortKey{{ColIdx: 0, Desc: true}}
+	// Desc: larger value sorts first, so 2 < 1 in desc order
 	if !compareRows(b, a, bN, aN, keys) {
-		t.Error("2 < 1 desc: expected true")
+		t.Error("2 < 1 Desc: expected true")
 	}
 }
 
 func TestCompareRows_TieBreak(t *testing.T) {
 	a, aN := makeRow(int32(1), "alpha")
 	b, bN := makeRow(int32(1), "beta")
-	keys := []compiledSortKey{{colIdx: 0, desc: false}, {colIdx: 1, desc: false}}
+	keys := []CompiledSortKey{{ColIdx: 0, Desc: false}, {ColIdx: 1, Desc: false}}
 	if !compareRows(a, b, aN, bN, keys) {
 		t.Error("tie-break alpha<beta: expected true")
 	}
@@ -134,7 +134,7 @@ func TestCompareRows_TieBreak(t *testing.T) {
 func TestCompareRows_AllEqual_ReturnsFalse(t *testing.T) {
 	a, aN := makeRow(int32(5), "x")
 	b, bN := makeRow(int32(5), "x")
-	keys := []compiledSortKey{{colIdx: 0, desc: false}, {colIdx: 1, desc: false}}
+	keys := []CompiledSortKey{{ColIdx: 0, Desc: false}, {ColIdx: 1, Desc: false}}
 	if compareRows(a, b, aN, bN, keys) {
 		t.Error("equal rows: expected false")
 	}
@@ -143,7 +143,7 @@ func TestCompareRows_AllEqual_ReturnsFalse(t *testing.T) {
 func TestCompareRows_NullSortsLast_Asc(t *testing.T) {
 	a, aN := makeRow(nil)
 	b, bN := makeRow(int32(1))
-	keys := []compiledSortKey{{colIdx: 0, desc: false}}
+	keys := []CompiledSortKey{{ColIdx: 0, Desc: false}}
 	// null sorts after non-null in asc
 	if compareRows(a, b, aN, bN, keys) {
 		t.Error("null vs non-null asc: null should sort last (false)")
@@ -156,10 +156,10 @@ func TestCompareRows_NullSortsLast_Asc(t *testing.T) {
 func TestCompareRows_NullSortsLast_Desc(t *testing.T) {
 	a, aN := makeRow(nil)
 	b, bN := makeRow(int32(1))
-	keys := []compiledSortKey{{colIdx: 0, desc: true}}
+	keys := []CompiledSortKey{{ColIdx: 0, Desc: true}}
 	// null sorts after non-null even in desc
 	if compareRows(a, b, aN, bN, keys) {
-		t.Error("null vs non-null desc: null should still sort last (false)")
+		t.Error("null vs non-null Desc: null should still sort last (false)")
 	}
 }
 
@@ -197,7 +197,7 @@ func TestSortOp_SingleBatch_Asc(t *testing.T) {
 	input := &fakeOperator{batches: []*batch.Batch{int32SortBatch([]int32{3, 1, 2})}}
 	op := &SortOp{
 		Input: input,
-		Keys:  []compiledSortKey{{colIdx: 0, desc: false}},
+		Keys:  []CompiledSortKey{{ColIdx: 0, Desc: false}},
 	}
 	got := collectSortOp(t, op)
 	want := []int32{1, 2, 3}
@@ -212,7 +212,7 @@ func TestSortOp_SingleBatch_Desc(t *testing.T) {
 	input := &fakeOperator{batches: []*batch.Batch{int32SortBatch([]int32{3, 1, 2})}}
 	op := &SortOp{
 		Input: input,
-		Keys:  []compiledSortKey{{colIdx: 0, desc: true}},
+		Keys:  []CompiledSortKey{{ColIdx: 0, Desc: true}},
 	}
 	got := collectSortOp(t, op)
 	want := []int32{3, 2, 1}
@@ -230,7 +230,7 @@ func TestSortOp_MultiBatch_Sorted(t *testing.T) {
 	}}
 	op := &SortOp{
 		Input: input,
-		Keys:  []compiledSortKey{{colIdx: 0, desc: false}},
+		Keys:  []CompiledSortKey{{ColIdx: 0, Desc: false}},
 	}
 	got := collectSortOp(t, op)
 	want := []int32{1, 2, 3, 4, 5}
@@ -244,7 +244,7 @@ func TestSortOp_MultiBatch_Sorted(t *testing.T) {
 func TestSortOp_EmptyInput_ReturnsEOF(t *testing.T) {
 	op := &SortOp{
 		Input: &fakeOperator{batches: nil},
-		Keys:  []compiledSortKey{{colIdx: 0, desc: false}},
+		Keys:  []CompiledSortKey{{ColIdx: 0, Desc: false}},
 	}
 	_, err := op.Next()
 	if err != io.EOF {
@@ -257,7 +257,7 @@ func TestSortOp_BatchSizeRespected(t *testing.T) {
 	input := &fakeOperator{batches: []*batch.Batch{int32SortBatch([]int32{5, 4, 3, 2, 1})}}
 	op := &SortOp{
 		Input:     input,
-		Keys:      []compiledSortKey{{colIdx: 0, desc: false}},
+		Keys:      []CompiledSortKey{{ColIdx: 0, Desc: false}},
 		BatchSize: 2,
 	}
 	var lengths []int
@@ -292,7 +292,7 @@ func TestSortOp_StableSort_TiedKeys(t *testing.T) {
 	input := &fakeOperator{batches: []*batch.Batch{b}}
 	op := &SortOp{
 		Input: input,
-		Keys:  []compiledSortKey{{colIdx: 0, desc: false}},
+		Keys:  []CompiledSortKey{{ColIdx: 0, Desc: false}},
 	}
 	got, err := op.Next()
 	if err != nil {
@@ -319,7 +319,7 @@ func TestSortOp_NullSortsLast(t *testing.T) {
 	input := &fakeOperator{batches: []*batch.Batch{b}}
 	op := &SortOp{
 		Input: input,
-		Keys:  []compiledSortKey{{colIdx: 0, desc: false}},
+		Keys:  []CompiledSortKey{{ColIdx: 0, Desc: false}},
 	}
 	got, err := op.Next()
 	if err != nil {
@@ -337,7 +337,7 @@ func TestSortOp_NullSortsLast(t *testing.T) {
 
 func TestSortOp_Close_Delegates(t *testing.T) {
 	input := &fakeOperator{closeErr: io.ErrUnexpectedEOF}
-	op := &SortOp{Input: input, Keys: []compiledSortKey{{colIdx: 0}}}
+	op := &SortOp{Input: input, Keys: []CompiledSortKey{{ColIdx: 0}}}
 	if err := op.Close(); err != io.ErrUnexpectedEOF {
 		t.Errorf("Close() = %v, want ErrUnexpectedEOF", err)
 	}
