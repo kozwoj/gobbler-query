@@ -1,7 +1,9 @@
 (* =====================================================================
-   Gobbler-Query — Simplified KQL-like Grammar
+   GQL (Gobbler Query Language ) — Simplified KQL-like Grammar
 
-   Covers: basic selection, projection, aggregation, inner join.
+   Covers: selection, projection, aggregation, inner join, 
+   sorting, counting and reduction (take)
+
    Intentionally excludes: graph operators, window functions,
    mv-expand, dynamic/JSON operations, let bindings, extend,
    case expressions, and join kinds other than inner.
