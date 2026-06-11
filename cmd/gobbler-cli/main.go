@@ -6,7 +6,12 @@ import (
 	"strings"
 )
 
-const topLevelHelp = `Gobbler Query Language CLI
+func topLevelHelp() string {
+	defaultCatalog, err := resolveCatalogPath("")
+	if err != nil {
+		defaultCatalog = "<home>/.gobbler/catalog.json"
+	}
+	return "\x1b[1;31mGobbler Query Language CLI\x1b[0m" + `
 
 gq — query Gobbler data sources using GQL
 
@@ -14,7 +19,7 @@ Usage:
   gq [--catalog <path>] <noun> <verb> [args] [flags]
 
 Global Flags:
-  --catalog <path>   catalog file to use (default: ~/.gobbler/catalog.json)
+  --catalog <path>   catalog file to use (default: ` + defaultCatalog + `)
                      a .gobbler.json in the current directory takes precedence
 
 Nouns:
@@ -22,12 +27,14 @@ Nouns:
   query     execute GQL queries
 
 Run 'gq <noun> --help' for the list of commands in each noun.`
+}
 
 func main() {
+	enableANSI()
 	rest, catalogOverride := stripGlobalFlags(os.Args[1:])
 
 	if len(rest) == 0 || rest[0] == "--help" || rest[0] == "-h" {
-		fmt.Println(topLevelHelp)
+		fmt.Println(topLevelHelp())
 		os.Exit(0)
 	}
 

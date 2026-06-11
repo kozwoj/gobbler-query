@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 )
 
-const catalogNounHelp = `gq catalog — manage table registrations
+const catalogNounHelp = "\x1b[1;31mgq catalog — manage table registrations\x1b[0m" + `
 
 Commands:
   add <table>     register a table (file mode or blob mode)
@@ -48,14 +49,14 @@ func runCatalog(args []string, catalogOverride string) {
 
 // ── add ───────────────────────────────────────────────────────────────────────
 
-const catalogAddHelp = `gq catalog add — register a table
+const catalogAddHelp = "\x1b[1;31mgq catalog add — register a table\x1b[0m" + `
 
 Usage:
   gq catalog add <table> --dir <path>
   gq catalog add <table> --account <name> --container <name>
 
 Flags:
-  --dir <path>         directory containing the table's CSV files (file mode)
+  --dir <path>         directory containing the table's CSV files (file mode); relative paths are resolved to absolute at registration time
   --account <name>     Azure storage account name (blob mode)
   --container <name>   Azure blob container name (blob mode)
 `
@@ -88,8 +89,13 @@ func cmdCatalogAdd(args []string, catalogOverride string) {
 
 	switch {
 	case *dir != "":
+		abs, err := filepath.Abs(*dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gq catalog add: cannot resolve --dir: %v\n", err)
+			os.Exit(1)
+		}
 		entry.Mode = "file"
-		entry.Dir = *dir
+		entry.Dir = abs
 	case *account != "" || *container != "":
 		entry.Mode = "blob"
 		entry.Account = *account
@@ -128,7 +134,7 @@ func cmdCatalogAdd(args []string, catalogOverride string) {
 
 // ── remove ────────────────────────────────────────────────────────────────────
 
-const catalogRemoveHelp = `gq catalog remove — deregister a table
+const catalogRemoveHelp = "\x1b[1;31mgq catalog remove — deregister a table\x1b[0m" + `
 
 Usage:
   gq catalog remove <table>
@@ -183,7 +189,7 @@ func cmdCatalogRemove(args []string, catalogOverride string) {
 
 // ── list ──────────────────────────────────────────────────────────────────────
 
-const catalogListHelp = `gq catalog list — print all registered tables
+const catalogListHelp = "\x1b[1;31mgq catalog list — print all registered tables\x1b[0m" + `
 
 Usage:
   gq catalog list
@@ -229,7 +235,7 @@ func cmdCatalogList(args []string, catalogOverride string) {
 
 // ── show ──────────────────────────────────────────────────────────────────────
 
-const catalogShowHelp = `gq catalog show — print a single entry's details
+const catalogShowHelp = "\x1b[1;31mgq catalog show — print a single entry's details\x1b[0m" + `
 
 Usage:
   gq catalog show <table>
@@ -286,7 +292,7 @@ func cmdCatalogShow(args []string, catalogOverride string) {
 
 // ── load ──────────────────────────────────────────────────────────────────────
 
-const catalogLoadHelp = `gq catalog load — merge entries from a snapshot file into the catalog
+const catalogLoadHelp = "\x1b[1;31mgq catalog load — merge entries from a snapshot file into the catalog\x1b[0m" + `
 
 Usage:
   gq catalog load <file>
@@ -360,7 +366,7 @@ func cmdCatalogLoad(args []string, catalogOverride string) {
 
 // ── export ────────────────────────────────────────────────────────────────────
 
-const catalogExportHelp = `gq catalog export — write the current catalog to a snapshot file
+const catalogExportHelp = "\x1b[1;31mgq catalog export — write the current catalog to a snapshot file\x1b[0m" + `
 
 Usage:
   gq catalog export [--out <file>]

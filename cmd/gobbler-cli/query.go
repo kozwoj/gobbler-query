@@ -17,14 +17,14 @@ import (
 	"github.com/kozwoj/gobbler-query/query/parser"
 )
 
-const queryNounHelp = `gq query — execute GQL queries
+const queryNounHelp = "\x1b[1;31mgq query — execute GQL queries\x1b[0m" + `
 
 Commands:
   run   execute a GQL query
 
 Run 'gq query <verb> --help' for full usage of each command.`
 
-const queryRunHelp = `gq query run — execute a GQL query
+const queryRunHelp = "\x1b[1;31mgq query run — execute a GQL query\x1b[0m" + `
 
 Usage:
   gq query run "<gql>" [flags]

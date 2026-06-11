@@ -23,7 +23,7 @@ type CatalogEntry struct {
 // resolveCatalogPath returns the path of the active catalog file.
 //   - override (from --catalog) takes highest precedence
 //   - .gobbler.json in the current directory is next
-//   - ~/.gobbler/catalog.json is the default
+//   - <home>/.gobbler/catalog.json is the default (os.UserHomeDir)
 func resolveCatalogPath(override string) (string, error) {
 	if override != "" {
 		return override, nil
