@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kozwoj/gobbler-query/query/ast"
+	"github.com/kozwoj/gobbler-query/query/batch"
 	"github.com/kozwoj/gobbler-query/query/catalog"
 	"github.com/kozwoj/gobbler-query/query/expr"
 	"github.com/kozwoj/gobbler-query/query/logical"
@@ -57,7 +58,7 @@ func (p *planner) build(node logical.LogicalNode) (physical.Operator, error) {
 	case *logical.LogicalCount:
 		return p.buildCount(n)
 	case *logical.LogicalJoin:
-		return nil, fmt.Errorf("planner: join not yet implemented")
+		return p.buildJoin(n)
 	default:
 		return nil, fmt.Errorf("planner: unknown node type %T", node)
 	}
@@ -228,6 +229,82 @@ func (p *planner) buildTake(n *logical.LogicalTake) (physical.Operator, error) {
 	return &physical.LimitOp{Input: input, Remaining: int(n.Count)}, nil
 }
 
+// ─── Join ─────────────────────────────────────────────────────────────────────
+
+func (p *planner) buildJoin(n *logical.LogicalJoin) (physical.Operator, error) {
+	leftSchema, err := p.inferTypedSchema(n.Left)
+	if err != nil {
+		return nil, err
+	}
+	rightSchema, err := p.inferTypedSchema(n.Right)
+	if err != nil {
+		return nil, err
+	}
+
+	// Resolve each join key to column indices in the left and right schemas.
+	leftKeyIdxs := make([]int, len(n.Keys))
+	rightKeyIdxs := make([]int, len(n.Keys))
+	for i, key := range n.Keys {
+		switch k := key.(type) {
+		case *ast.SameNameKey:
+			lIdx, err := colIndexInTypedSchema(leftSchema, ast.FieldRef{Name: k.Name})
+			if err != nil {
+				return nil, fmt.Errorf("planner: join key %q not found in left schema: %w", k.Name, err)
+			}
+			rIdx, err := colIndexInTypedSchema(rightSchema, ast.FieldRef{Name: k.Name})
+			if err != nil {
+				return nil, fmt.Errorf("planner: join key %q not found in right schema: %w", k.Name, err)
+			}
+			leftKeyIdxs[i] = lIdx
+			rightKeyIdxs[i] = rIdx
+		case *ast.ExplicitKey:
+			lIdx, err := colIndexInTypedSchema(leftSchema, ast.FieldRef{Name: k.Left})
+			if err != nil {
+				return nil, fmt.Errorf("planner: join $left.%s not found: %w", k.Left, err)
+			}
+			rIdx, err := colIndexInTypedSchema(rightSchema, ast.FieldRef{Name: k.Right})
+			if err != nil {
+				return nil, fmt.Errorf("planner: join $right.%s not found: %w", k.Right, err)
+			}
+			leftKeyIdxs[i] = lIdx
+			rightKeyIdxs[i] = rIdx
+		default:
+			return nil, fmt.Errorf("planner: unknown join key type %T", key)
+		}
+	}
+
+	// Build the output schema: left columns || right columns.
+	outCols := make([]inferredCol, 0, len(leftSchema)+len(rightSchema))
+	outCols = append(outCols, leftSchema...)
+	outCols = append(outCols, rightSchema...)
+
+	outSchema := make([]batch.ColumnMeta, len(outCols))
+	outKinds := make([]physical.VecKind, len(outCols))
+	for i, col := range outCols {
+		outSchema[i] = batch.ColumnMeta{Name: col.Name, Origin: col.Origin}
+		outKinds[i] = physical.VecKindFromColumnType(col.Type)
+	}
+
+	left, err := p.build(n.Left)
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.build(n.Right)
+	if err != nil {
+		return nil, err
+	}
+
+	return &physical.HashJoinOp{
+		Left:         left,
+		Right:        right,
+		LeftKeyIdxs:  leftKeyIdxs,
+		RightKeyIdxs: rightKeyIdxs,
+		OutSchema:    outSchema,
+		OutKinds:     outKinds,
+		BatchSize:    p.batchSize,
+	}, nil
+}
+
 // ─── Count ────────────────────────────────────────────────────────────────────
 
 func (p *planner) buildCount(n *logical.LogicalCount) (physical.Operator, error) {
@@ -281,9 +358,27 @@ func (p *planner) inferTypedSchema(node logical.LogicalNode) ([]inferredCol, err
 	case *logical.LogicalCount:
 		return []inferredCol{{Name: "count_", Type: source.TypeInt64}}, nil
 
+	case *logical.LogicalJoin:
+		return p.inferJoinSchema(n)
+
 	default:
 		return nil, fmt.Errorf("planner: inferTypedSchema: unknown node %T", node)
 	}
+}
+
+func (p *planner) inferJoinSchema(n *logical.LogicalJoin) ([]inferredCol, error) {
+	left, err := p.inferTypedSchema(n.Left)
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.inferTypedSchema(n.Right)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]inferredCol, 0, len(left)+len(right))
+	out = append(out, left...)
+	out = append(out, right...)
+	return out, nil
 }
 
 func (p *planner) inferProjectSchema(n *logical.LogicalProject) ([]inferredCol, error) {

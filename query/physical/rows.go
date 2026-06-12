@@ -8,13 +8,13 @@ import (
 	"github.com/kozwoj/gobbler-query/query/source"
 )
 
-// vecKind records which concrete ColumnVector type a column uses.
+// VecKind records which concrete ColumnVector type a column uses.
 // It is captured from the first batch and used to build correctly-typed
 // all-null vectors in buildBatchFromRows.
-type vecKind int
+type VecKind int
 
 const (
-	vecInt32 vecKind = iota
+	vecInt32 VecKind = iota
 	vecInt64
 	vecFloat64
 	vecString
@@ -24,7 +24,7 @@ const (
 	vecDynamic
 )
 
-func vecKindOf(cv batch.ColumnVector) (vecKind, error) {
+func vecKindOf(cv batch.ColumnVector) (VecKind, error) {
 	switch cv.(type) {
 	case *batch.Int32Vector:
 		return vecInt32, nil
@@ -47,10 +47,10 @@ func vecKindOf(cv batch.ColumnVector) (vecKind, error) {
 	}
 }
 
-// vecKindFromColumnType converts a source.ColumnType to the matching vecKind.
+// VecKindFromColumnType converts a source.ColumnType to the matching VecKind.
 // Used so CompiledProjectItem.Type can seed buildBatchFromRows when no input
 // batch has been seen (all-null column from the very first row).
-func vecKindFromColumnType(ct source.ColumnType) vecKind {
+func VecKindFromColumnType(ct source.ColumnType) VecKind {
 	switch ct {
 	case source.TypeInt32:
 		return vecInt32
@@ -74,7 +74,7 @@ func vecKindFromColumnType(ct source.ColumnType) vecKind {
 }
 
 // emptyTypedVector builds an all-null ColumnVector of the given kind and length.
-func emptyTypedVector(kind vecKind, n int, nullBits []uint64) batch.ColumnVector {
+func emptyTypedVector(kind VecKind, n int, nullBits []uint64) batch.ColumnVector {
 	switch kind {
 	case vecInt32:
 		return &batch.Int32Vector{Values: make([]int32, n), Nulls: nullBits}
@@ -100,7 +100,7 @@ func emptyTypedVector(kind vecKind, n int, nullBits []uint64) batch.ColumnVector
 // (SortOp, HashAggregateOp, HashJoinOp).
 type materializedRows struct {
 	Schema   []batch.ColumnMeta
-	ColKinds []vecKind // concrete vector type per column; set on first appendBatch
+	ColKinds []VecKind // concrete vector type per column; set on first appendBatch
 	Rows     [][]any   // Rows[i][j] = value at row i, column j; nil when null
 	Nulls    [][]bool  // Nulls[i][j] = true when cell (i,j) is null
 }
@@ -115,7 +115,7 @@ func (m *materializedRows) appendBatch(b *batch.Batch) error {
 	}
 	if m.Schema == nil {
 		m.Schema = b.Schema
-		m.ColKinds = make([]vecKind, len(b.Columns))
+		m.ColKinds = make([]VecKind, len(b.Columns))
 		for i, cv := range b.Columns {
 			k, err := vecKindOf(cv)
 			if err != nil {

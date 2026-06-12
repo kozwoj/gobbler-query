@@ -25,7 +25,7 @@ func (op *ProjectOp) Next() (*batch.Batch, error) {
 
 	for i, item := range op.Items {
 		schema[i] = batch.ColumnMeta{Name: item.Name, Origin: item.Origin}
-		col, err := evalProjectColumn(item.Eval, vecKindFromColumnType(item.Type), b)
+		col, err := evalProjectColumn(item.Eval, VecKindFromColumnType(item.Type), b)
 		if err != nil {
 			return nil, err
 		}
@@ -44,7 +44,7 @@ func (op *ProjectOp) Close() error {
 
 // evalProjectColumn evaluates eval for every row of b and returns a typed ColumnVector.
 // kind is used to produce the correct all-null vector when every row evaluates to null.
-func evalProjectColumn(eval expr.ScalarEval, kind vecKind, b *batch.Batch) (batch.ColumnVector, error) {
+func evalProjectColumn(eval expr.ScalarEval, kind VecKind, b *batch.Batch) (batch.ColumnVector, error) {
 	n := b.Length
 	vals := make([]any, n)
 	nullFlags := make([]bool, n)
@@ -62,7 +62,7 @@ func evalProjectColumn(eval expr.ScalarEval, kind vecKind, b *batch.Batch) (batc
 // buildVectorTyped creates a typed ColumnVector from a slice of any values.
 // The concrete vector type is inferred from the first non-null value.
 // When all values are null, kind determines the output vector type.
-func buildVectorTyped(vals []any, nullFlags []bool, kind vecKind) batch.ColumnVector {
+func buildVectorTyped(vals []any, nullFlags []bool, kind VecKind) batch.ColumnVector {
 	for i, v := range vals {
 		if nullFlags[i] {
 			continue

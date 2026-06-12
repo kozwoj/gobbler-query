@@ -2,15 +2,21 @@ package main
 
 import (
 	"os"
-
-	"golang.org/x/sys/windows"
+	"syscall"
 )
 
+var (
+	kernel32       = syscall.NewLazyDLL("kernel32.dll")
+	setConsoleMode = kernel32.NewProc("SetConsoleMode")
+)
+
+const enableVirtualTerminalProcessing = 0x0004
+
 func enableANSI() {
-	stdout := windows.Handle(os.Stdout.Fd())
+	stdout := syscall.Handle(os.Stdout.Fd())
 	var mode uint32
-	if err := windows.GetConsoleMode(stdout, &mode); err != nil {
+	if err := syscall.GetConsoleMode(stdout, &mode); err != nil {
 		return
 	}
-	windows.SetConsoleMode(stdout, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+	setConsoleMode.Call(uintptr(stdout), uintptr(mode|enableVirtualTerminalProcessing))
 }

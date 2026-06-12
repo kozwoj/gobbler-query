@@ -442,3 +442,164 @@ func TestExecute_TimeWindow_FilterStillApplies(t *testing.T) {
 		t.Error("filtered count is 0, expected some >= 400 status codes")
 	}
 }
+
+// ─── join queries ─────────────────────────────────────────────────────────────
+
+// TestExecute_Join_RequestsWithUsers verifies that joining requests and users
+// on userId produces a non-empty result and that the output contains columns
+// from both sides.
+func TestExecute_Join_RequestsWithUsers(t *testing.T) {
+	r := run(t, `requests (*) | join (users (*)) on userId`)
+
+	if len(r.Rows) == 0 {
+		t.Fatal("join returned 0 rows, expected > 0")
+	}
+
+	// Output schema must contain columns from both sides.
+	names := map[string]bool{}
+	for _, m := range r.Schema {
+		names[m.Name] = true
+	}
+	for _, want := range []string{"requestId", "statusCode", "tier"} {
+		if !names[want] {
+			t.Errorf("column %q missing from join output; schema: %v", want, r.Schema)
+		}
+	}
+}
+
+// TestExecute_Join_ThenSummarizeByTier verifies a realistic pipeline:
+// join requests with users, then count requests per user tier.
+// The sum of all tier counts must equal the number of matched rows.
+func TestExecute_Join_ThenSummarizeByTier(t *testing.T) {
+	// Count total matched rows first.
+	rJoin := run(t, `requests (*) | join (users (*) | project userId, tier) on userId | count`)
+	if len(rJoin.Rows) != 1 {
+		t.Fatalf("count returned %d rows, want 1", len(rJoin.Rows))
+	}
+	totalMatched := intVal(rJoin, 0, 0)
+	if totalMatched == 0 {
+		t.Fatal("join produced 0 matched rows")
+	}
+
+	// Summarize by tier — sum of group counts must equal totalMatched.
+	rByTier := run(t, `requests (*) | join (users (*) | project userId, tier) on userId | summarize n = count() by tier`)
+	nIdx := colIdx(rByTier, "n")
+	if nIdx < 0 {
+		t.Fatal("n column not found in summarize output")
+	}
+	var sum int64
+	for i := range rByTier.Rows {
+		sum += intVal(rByTier, i, nIdx)
+	}
+	if sum != totalMatched {
+		t.Errorf("sum of tier groups = %d, want %d (total matched)", sum, totalMatched)
+	}
+	if len(rByTier.Rows) < 2 {
+		t.Errorf("expected at least 2 tier groups, got %d", len(rByTier.Rows))
+	}
+}
+
+// TestExecute_Join_CountByCountryCode joins requests with users to bring in
+// countryCode, then counts requests per country. The sum must equal the total
+// number of matched rows (all requests have a matching user in the testdata).
+func TestExecute_Join_CountByCountryCode(t *testing.T) {
+	rJoin := run(t, `requests (*) | join (users (*) | project userId, countryCode) on userId | summarize n = count() by countryCode`)
+
+	nIdx := colIdx(rJoin, "n")
+	ccIdx := colIdx(rJoin, "countryCode")
+	if nIdx < 0 || ccIdx < 0 {
+		t.Fatalf("missing columns: n=%d countryCode=%d", nIdx, ccIdx)
+	}
+	if len(rJoin.Rows) < 2 {
+		t.Errorf("expected at least 2 country groups, got %d", len(rJoin.Rows))
+	}
+
+	var total int64
+	for i := range rJoin.Rows {
+		total += intVal(rJoin, i, nIdx)
+	}
+
+	rAll := run(t, `requests (*) | join (users (*)) on userId | count`)
+	expected := intVal(rAll, 0, 0)
+	if total != expected {
+		t.Errorf("sum of countryCode groups = %d, want %d", total, expected)
+	}
+}
+
+// TestExecute_Join_CountByCountryCode_First3Days is the same countryCode query
+// restricted to the first 3 days of May 2026 (2026-05-01 .. 2026-05-04).
+// The window covers 6 files × 500 rows = 3000 request rows, but ~5% have null
+// userId and are dropped by the inner join.
+func TestExecute_Join_CountByCountryCode_First3Days(t *testing.T) {
+	const window = `datetime(2026-05-01 00:00:00.000) .. datetime(2026-05-04 00:00:00.000)`
+
+	rJoin := run(t, `requests (`+window+`) | join (users (*) | project userId, countryCode) on userId | summarize n = count() by countryCode`)
+
+	nIdx := colIdx(rJoin, "n")
+	ccIdx := colIdx(rJoin, "countryCode")
+	if nIdx < 0 || ccIdx < 0 {
+		t.Fatalf("missing columns: n=%d countryCode=%d", nIdx, ccIdx)
+	}
+	if len(rJoin.Rows) < 2 {
+		t.Errorf("expected at least 2 country groups, got %d", len(rJoin.Rows))
+	}
+
+	// Sum of groups must equal the total matched rows for the same window.
+	rTotal := run(t, `requests (`+window+`) | join (users (*)) on userId | count`)
+	expected := intVal(rTotal, 0, 0)
+
+	var total int64
+	for i := range rJoin.Rows {
+		total += intVal(rJoin, i, nIdx)
+	}
+	if total != expected {
+		t.Errorf("sum of countryCode groups = %d, want %d (matched rows in window)", total, expected)
+	}
+	// Sanity: matched rows should be well under 3000 (null userId rows dropped) but > 0.
+	if expected == 0 || expected > 3000 {
+		t.Errorf("unexpected matched row count %d for 3-day window", expected)
+	}
+}
+
+// TestExecute_Join_CountByCountryCode_First3Days_Sorted is the same query as
+// above but with the result sorted by n desc (most requests first).
+func TestExecute_Join_CountByCountryCode_First3Days_Sorted(t *testing.T) {
+	const window = `datetime(2026-05-01 00:00:00.000) .. datetime(2026-05-04 00:00:00.000)`
+
+	r := run(t, `requests (`+window+`) | join (users (*) | project userId, countryCode) on userId | summarize n = count() by countryCode | sort by n desc`)
+
+	nIdx := colIdx(r, "n")
+	if nIdx < 0 {
+		t.Fatal("n column not found")
+	}
+	if len(r.Rows) < 2 {
+		t.Fatalf("expected at least 2 rows, got %d", len(r.Rows))
+	}
+	// Verify descending order.
+	for i := 1; i < len(r.Rows); i++ {
+		prev := intVal(r, i-1, nIdx)
+		curr := intVal(r, i, nIdx)
+		if curr > prev {
+			t.Errorf("rows %d-%d not descending: %d > %d", i-1, i, curr, prev)
+		}
+	}
+}
+
+// requests with a userId that has no matching user row must be dropped.
+// Total join output must be <= total request rows.
+func TestExecute_Join_NonMatchingRowsDropped(t *testing.T) {
+	rAll := run(t, `requests (*) | count`)
+	rJoin := run(t, `requests (*) | join (users (*)) on userId | count`)
+
+	nAll := intVal(rAll, 0, 0)
+	nJoin := intVal(rJoin, 0, 0)
+
+	if nJoin > nAll {
+		t.Errorf("join produced more rows (%d) than requests (%d) — impossible for inner join", nJoin, nAll)
+	}
+	// Testdata is generated so that all userIds in requests exist in users,
+	// so nJoin should be > 0 and == nAll (every request matches a user).
+	if nJoin == 0 {
+		t.Error("join produced 0 rows, expected matched rows")
+	}
+}

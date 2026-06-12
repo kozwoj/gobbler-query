@@ -88,7 +88,7 @@ func (op *HashAggregateOp) aggregate() error {
 			// Evaluate group-by columns for this row.
 			byVals := make([]any, len(op.GroupBy))
 			byNulls := make([]bool, len(op.GroupBy))
-		for i, gc := range op.GroupBy {
+			for i, gc := range op.GroupBy {
 				v, null, err := gc.Eval(b, row)
 				if err != nil {
 					return err
@@ -183,14 +183,14 @@ func (op *HashAggregateOp) buildOutputSchema() []batch.ColumnMeta {
 	return schema
 }
 
-// buildColKinds returns the vecKind slice for agg then group-by columns.
-func (op *HashAggregateOp) buildColKinds() []vecKind {
-	kinds := make([]vecKind, 0, len(op.Aggs)+len(op.GroupBy))
+// buildColKinds returns the VecKind slice for agg then group-by columns.
+func (op *HashAggregateOp) buildColKinds() []VecKind {
+	kinds := make([]VecKind, 0, len(op.Aggs)+len(op.GroupBy))
 	for _, a := range op.Aggs {
-		kinds = append(kinds, vecKindFromColumnType(a.Type))
+		kinds = append(kinds, VecKindFromColumnType(a.Type))
 	}
 	for _, g := range op.GroupBy {
-		kinds = append(kinds, vecKindFromColumnType(g.Type))
+		kinds = append(kinds, VecKindFromColumnType(g.Type))
 	}
 	return kinds
 }

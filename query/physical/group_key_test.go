@@ -64,7 +64,9 @@ func TestGroupKey_StringPairAmbiguity(t *testing.T) {
 	// Without length encoding, ["a","bc"] and ["ab","c"] would collide.
 	r1, n1 := kr("a", "bc")
 	r2, n2 := kr("ab", "c")
-	if key(r1, n1, 0, 1) == key(r2, n2, 0, 1) {
+	k1 := key(r1, n1, 0, 1)
+	k2 := key(r2, n2, 0, 1)
+	if k1 == k2 {
 		t.Error(`["a","bc"] and ["ab","c"] must produce different keys`)
 	}
 }
@@ -109,7 +111,9 @@ func TestGroupKey_SelectsOnlySpecifiedCols(t *testing.T) {
 func TestGroupKey_DifferentSelectedCols_Different(t *testing.T) {
 	r1, n1 := kr("a", "b")
 	r2, n2 := kr("b", "a")
-	if key(r1, n1, 0, 1) == key(r2, n2, 0, 1) {
+	k1 := key(r1, n1, 0, 1)
+	k2 := key(r2, n2, 0, 1)
+	if k1 == k2 {
 		t.Error("swapped values must produce different keys")
 	}
 }
