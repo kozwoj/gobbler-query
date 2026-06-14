@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -601,5 +602,152 @@ func TestExecute_Join_NonMatchingRowsDropped(t *testing.T) {
 	// so nJoin should be > 0 and == nAll (every request matches a user).
 	if nJoin == 0 {
 		t.Error("join produced 0 rows, expected matched rows")
+	}
+}
+
+// ─── dynamic column tests ─────────────────────────────────────────────────────
+
+// dynamicCatalog creates a temp directory with a single-table CSV data set that
+// has a dynamic (opaque JSON string) column, and returns the catalog pointing
+// at it.
+//
+// Schema: id (string), meta (dynamic), score (int)
+// Rows:
+//
+//	r1  {"env":"prod","version":2}   100
+//	r2  {"env":"dev","version":1}    200
+//	r3  {"env":"prod","version":3}   150
+//	r4  (null meta)                  50
+func dynamicCatalog(t *testing.T) catalog.Catalog {
+	t.Helper()
+	dir := t.TempDir()
+	tableDir := filepath.Join(dir, "events")
+	if err := os.MkdirAll(tableDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	typeJSON := `{
+  "name": "events",
+  "orderedColumns": [
+    {"name": "timestamp", "type": "datetime"},
+    {"name": "id",        "type": "string"},
+    {"name": "meta",      "type": "dynamic"},
+    {"name": "score",     "type": "int"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(tableDir, "events.json"), []byte(typeJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// File name must use the Gobbler convention: <timestamp>_<typeName>.csv
+	csvData := `2026-05-01T00:00:00.000Z,r1,"{""env"":""prod"",""version"":2}",100` + "\n" +
+		`2026-05-01T00:01:00.000Z,r2,"{""env"":""dev"",""version"":1}",200` + "\n" +
+		`2026-05-01T00:02:00.000Z,r3,"{""env"":""prod"",""version"":3}",150` + "\n" +
+		"2026-05-01T00:03:00.000Z,r4,,50\n"
+	if err := os.WriteFile(filepath.Join(tableDir, "2026-05-01_00-00-00.000_events.csv"), []byte(csvData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	return catalog.Catalog{
+		"events": {
+			TypeName:      "events",
+			StorageBucket: "events",
+			Mode:          catalog.StorageModeFile,
+			OutputDir:     dir,
+		},
+	}
+}
+
+// runDyn is like run() but uses the dynamic catalog.
+func runDyn(t *testing.T, q string) *Result {
+	t.Helper()
+	r, err := Execute(q, dynamicCatalog(t), 256)
+	if err != nil {
+		t.Fatalf("Execute(%q): %v", q, err)
+	}
+	return r
+}
+
+// TestExecute_Dynamic_FullScan verifies that a full scan over a table with a
+// dynamic column returns all rows with the raw JSON string preserved.
+func TestExecute_Dynamic_FullScan(t *testing.T) {
+	r := runDyn(t, `events (*) | count`)
+	if len(r.Rows) != 1 {
+		t.Fatalf("count returned %d rows, want 1", len(r.Rows))
+	}
+	if n := intVal(r, 0, 0); n != 4 {
+		t.Errorf("count = %d, want 4", n)
+	}
+}
+
+// TestExecute_Dynamic_Project verifies that projecting a dynamic column passes
+// the raw JSON string through to the result unchanged.
+func TestExecute_Dynamic_Project(t *testing.T) {
+	r := runDyn(t, `events (*) | project id, meta`)
+	if len(r.Schema) != 2 {
+		t.Fatalf("schema len = %d, want 2", len(r.Schema))
+	}
+	metaIdx := colIdx(r, "meta")
+	if metaIdx < 0 {
+		t.Fatal("meta column not found")
+	}
+	// Row 0 (r1): meta must be the raw JSON string, not parsed.
+	v := strVal(r, 0, metaIdx)
+	if v == "" {
+		t.Error("meta for r1 is empty, want JSON string")
+	}
+	// Row 3 (r4): meta must be null.
+	if !r.Nulls[3][metaIdx] {
+		t.Errorf("row 3 meta should be null, got %v", r.Rows[3][metaIdx])
+	}
+}
+
+// TestExecute_Dynamic_Where_Eq verifies that == comparison on a dynamic column
+// works: it matches the exact raw JSON string.
+func TestExecute_Dynamic_Where_Eq(t *testing.T) {
+	// The CSV stores the value as a JSON string; match it exactly.
+	r := runDyn(t, `events (*) | where meta == "{\"env\":\"prod\",\"version\":2}"`)
+	if len(r.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(r.Rows))
+	}
+	if strVal(r, 0, colIdx(r, "id")) != "r1" {
+		t.Errorf("expected row r1, got %v", r.Rows[0])
+	}
+}
+
+// TestExecute_Dynamic_NullsPreserved verifies that null dynamic values
+// survive a project stage.
+func TestExecute_Dynamic_NullsPreserved(t *testing.T) {
+	r := runDyn(t, `events (*) | project meta`)
+	metaIdx := colIdx(r, "meta")
+	nullCount := 0
+	for i := range r.Rows {
+		if r.Nulls[i][metaIdx] {
+			nullCount++
+		}
+	}
+	if nullCount != 1 {
+		t.Errorf("null meta count = %d, want 1", nullCount)
+	}
+}
+
+// TestExecute_Dynamic_SummarizeCount_ByMeta verifies that a dynamic column
+// can be used as a group-by key in summarize (groups by exact JSON string).
+func TestExecute_Dynamic_SummarizeCount_ByMeta(t *testing.T) {
+	r := runDyn(t, `events (*) | summarize n = count() by meta`)
+	nIdx := colIdx(r, "n")
+	if nIdx < 0 {
+		t.Fatal("n column not found")
+	}
+	// 3 distinct non-null JSON values + 1 null group = 4 groups.
+	if len(r.Rows) != 4 {
+		t.Errorf("group count = %d, want 4 (3 JSON values + 1 null)", len(r.Rows))
+	}
+	var total int64
+	for i := range r.Rows {
+		total += intVal(r, i, nIdx)
+	}
+	if total != 4 {
+		t.Errorf("sum = %d, want 4", total)
 	}
 }

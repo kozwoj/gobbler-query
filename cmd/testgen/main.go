@@ -1,6 +1,6 @@
 // cmd/testgen generates committed static test data for source-layer and
 // query-execution tests. Output matches the file layout that Gobbler produces:
-// one type.json per type directory and CSV files named after the timestamp of
+// one {typeName}.json per type directory and CSV files named after the timestamp of
 // their first row.
 //
 // Run: go run ./cmd/testgen -seed 42 -out ./testdata
@@ -34,7 +34,7 @@ var refStart = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 // usersWindowStart is the start of the users ingest window (day before requests).
 var usersWindowStart = time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)
 
-// ---- type.json types (matches Gobbler's storedItemDef) ----------------------
+// ---- {typeName}.json types (matches Gobbler's storedItemDef) ----------------------
 
 type storedColumn struct {
 	Name string `json:"name"`
@@ -159,7 +159,7 @@ func writeTypeJSON(dir string, def storedItemDef) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "type.json"), data, 0644)
+	return os.WriteFile(filepath.Join(dir, def.Name+".json"), data, 0644)
 }
 
 // buildUserIDs returns the deterministic list of userId values.
@@ -332,11 +332,11 @@ func main() {
 	}
 
 	if err := writeTypeJSON(reqDir, requestsTypeDef); err != nil {
-		fmt.Fprintf(os.Stderr, "error: requests type.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: requests requests.json: %v\n", err)
 		os.Exit(1)
 	}
 	if err := writeTypeJSON(usrDir, usersTypeDef); err != nil {
-		fmt.Fprintf(os.Stderr, "error: users type.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: users users.json: %v\n", err)
 		os.Exit(1)
 	}
 

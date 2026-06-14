@@ -27,12 +27,12 @@ type ColumnSchema struct {
 	Type ColumnType
 }
 
-// Schema is the parsed representation of a type.json file.
+// Schema is the parsed representation of a {typeName}.json file.
 type Schema struct {
 	Columns []ColumnSchema
 }
 
-// gobblerTypeMap maps Gobbler's type.json type strings to ColumnType.
+// gobblerTypeMap maps Gobbler's {typeName}.json type strings to ColumnType.
 var gobblerTypeMap = map[string]ColumnType{
 	"bool":     TypeBool,
 	"datetime": TypeDatetime,
@@ -43,7 +43,7 @@ var gobblerTypeMap = map[string]ColumnType{
 	"timespan": TypeTimespan,
 }
 
-// typeJSON is the structure of Gobbler's type.json file.
+// typeJSON is the structure of Gobbler's {typeName}.json file.
 type typeJSON struct {
 	Name           string `json:"name"`
 	OrderedColumns []struct {
@@ -52,14 +52,14 @@ type typeJSON struct {
 	} `json:"orderedColumns"`
 }
 
-// parseSchema unmarshals the contents of a type.json file into a Schema.
+// parseSchema unmarshals the contents of a {typeName}.json file into a Schema.
 func parseSchema(data []byte) (*Schema, error) {
 	var tj typeJSON
 	if err := json.Unmarshal(data, &tj); err != nil {
 		return nil, fmt.Errorf("parseSchema: invalid JSON: %w", err)
 	}
 	if len(tj.OrderedColumns) == 0 {
-		return nil, fmt.Errorf("parseSchema: type.json for %q has no columns", tj.Name)
+		return nil, fmt.Errorf("parseSchema: %s.json for %q has no columns", tj.Name, tj.Name)
 	}
 	cols := make([]ColumnSchema, len(tj.OrderedColumns))
 	for i, c := range tj.OrderedColumns {
@@ -72,12 +72,12 @@ func parseSchema(data []byte) (*Schema, error) {
 	return &Schema{Columns: cols}, nil
 }
 
-// LoadSchema reads and parses the type.json file found in typeDir.
+// LoadSchema reads and parses the {typeName}.json file found in typeDir.
 // typeDir is the resolved directory for the table (e.g. OutputDir/StorageBucket).
-func LoadSchema(typeDir string) (*Schema, error) {
-	data, err := os.ReadFile(filepath.Join(typeDir, "type.json"))
+func LoadSchema(typeDir, typeName string) (*Schema, error) {
+	data, err := os.ReadFile(filepath.Join(typeDir, typeName+".json"))
 	if err != nil {
-		return nil, fmt.Errorf("LoadSchema: read type.json in %q: %w", typeDir, err)
+		return nil, fmt.Errorf("LoadSchema: read %s.json in %q: %w", typeName, typeDir, err)
 	}
 	return parseSchema(data)
 }

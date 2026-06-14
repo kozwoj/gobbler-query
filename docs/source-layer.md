@@ -117,7 +117,7 @@ concern, to be designed separately.
 
 ## 2. Schema Representation
 
-The schema for a type is stored in `type.json` in the same directory or container as the CSV files. Gobbler writes this file when the directory/container is created. Column names, order, and types are taken directly from it — no inference is performed.
+The schema for a type is stored in `{typeName}.json` in the same directory or container as the CSV files. Gobbler writes this file when the directory/container is created. Column names, order, and types are taken directly from it — no inference is performed.
 
 ```go
 type ColumnType int
@@ -184,7 +184,7 @@ func NewFileTableReader(typeDir, typeName string, start, end time.Time, batchSiz
 - `typeDir` — the resolved directory for this type (from `TableEntry.Resolve`).
 - `typeName` — stored as the `Origin` in every `ColumnMeta` this reader emits.
 - `start`, `end` — the resolved time window (zero = open bound).
-- Loads `type.json` from `typeDir` on construction; returns error if missing or
+- Loads `{typeName}.json` from `typeDir` on construction; returns error if missing or
   malformed.
 - Runs entry-selection pruning at construction time; stores the ordered file list.
 - Opens the first file immediately so schema field-count validation happens before
@@ -201,7 +201,7 @@ type FileTableReader struct {
     fileIdx     int             // index of the currently open file
     file        *os.File        // currently open file handle
     csv         *csv.Reader     // wraps file
-    schema      *Schema         // loaded once from type.json
+    schema      *Schema         // loaded once from {typeName}.json
     typeName    string
     batchSize   int
     start       time.Time       // zero = open lower bound
@@ -223,7 +223,7 @@ func NewBlobTableReader(accountName, accountKey, container, typeName string, sta
 
 - `container` — the Azure Blob Storage container name (pre-resolved from
   `TableEntry.StorageBucket`).
-- Reads `type.json` from the container on construction (a blob named `"type.json"`).
+- Reads `{typeName}.json` from the container on construction (a blob named `"{typeName}.json"`).
 - Lists blobs in the container and applies the same entry-selection pruning as
   `FileTableReader`.
 - Opens (downloads) the first blob immediately for the same upfront schema
@@ -254,7 +254,7 @@ functions rather than a shared internal interface:
 
 | Helper | Purpose |
 |---|---|
-| `parseSchema(data []byte) (*Schema, error)` | Unmarshal `type.json` bytes |
+| `parseSchema(data []byte) (*Schema, error)` | Unmarshal `{typeName}.json` bytes |
 | `selectEntries(names []string, start, end time.Time) []string` | Prune entry list to time window |
 | `newColumnBuilders(schema *Schema, batchSize int) []columnBuilder` | Allocate per-column builders |
 | `fillBatch(r *csv.Reader, builders []columnBuilder, batchSize int, isFirst, isLast bool, start, end time.Time) (rows int, done bool, err error)` | Core read loop; applies boundary filtering |
@@ -331,7 +331,7 @@ CSV-quoted JSON, so Go's `csv.Reader` automatically unquotes the field before
 - **Malformed non-empty value** — treated as null in Phase 1 rather than failing.
 - **CSV parse errors** — propagated immediately.
 - **Schema mismatch** — on opening each entry, the first data row's field count is
-  compared against `type.json`. Returns an error before any row is appended
+  compared against `{typeName}.json`. Returns an error before any row is appended
   (descriptive: entry name, expected count, actual count). This catches
   stale CSV files or blobs left over after a type definition change.
 

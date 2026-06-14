@@ -32,7 +32,7 @@ func (ts typedSchema) toColumnMeta() []batch.ColumnMeta {
 // and returns the output schema of the plan root.
 //
 // schemas maps each source type name to its column schema, loaded from the
-// type.json files in the corresponding storage bucket. An error is returned
+// {typeName}.json files in the corresponding storage bucket. An error is returned
 // on the first validation failure encountered.
 func InferAndValidate(node LogicalNode, schemas map[string]*source.Schema) ([]batch.ColumnMeta, error) {
 	ts, err := inferNode(node, schemas)
@@ -278,6 +278,14 @@ func scalarKindOf(e ast.ScalarExpr, schema typedSchema) (scalarKind, error) {
 func checkCompareKinds(left, right scalarKind, op ast.CompareOp) error {
 	// If either side involves a BinaryExpr/UnaryMinusExpr, defer the type check.
 	if left == kindUnknown || right == kindUnknown {
+		return nil
+	}
+	// Dynamic columns are stored as plain strings; allow equality comparison
+	// against a string literal: meta == "..." or meta != "...".
+	if (left == kindDynamic && right == kindString) || (left == kindString && right == kindDynamic) {
+		if op != ast.CmpEq && op != ast.CmpNotEq {
+			return fmt.Errorf("operator %v not applicable to dynamic columns", op)
+		}
 		return nil
 	}
 	if left != right {

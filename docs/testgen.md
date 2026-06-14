@@ -18,11 +18,11 @@ gobbler-query/
     main.go
   testdata/          ← committed output
     requests/
-      type.json
+      requests.json
       2026-05-01_00-00-00.000_requests.csv
       ...
     users/
-      type.json
+      users.json
       2026-05-01_00-00-00.000_users.csv
 ```
 
@@ -33,7 +33,7 @@ Flags: `-seed int`, `-out string`, `-rows int` (rows per file, default 500), `-f
 ## Gobbler File Conventions
 
 - Filename: `2006-01-02_15-04-05.000_<typeName>.csv`
-- `type.json`: `{"name":"...","orderedColumns":[{"name":"timestamp","type":"datetime"}, ...]}`
+- `{typeName}.json`: `{"name":"...","orderedColumns":[{"name":"timestamp","type":"datetime"}, ...]}`
 - `timestamp` is always column 0 and is always prepended by gobbler
 - CSV rows: no header; values in `orderedColumns` order; empty string = null
 - Datetime format: `2006-01-02 15:04:05.000`

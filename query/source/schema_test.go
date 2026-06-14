@@ -6,9 +6,9 @@ import (
 )
 
 func TestParseSchema_Requests(t *testing.T) {
-	data, err := os.ReadFile("../../testdata/requests/type.json")
+	data, err := os.ReadFile("../../testdata/requests/requests.json")
 	if err != nil {
-		t.Fatalf("read type.json: %v", err)
+		t.Fatalf("read requests.json: %v", err)
 	}
 
 	schema, err := parseSchema(data)
@@ -39,9 +39,9 @@ func TestParseSchema_Requests(t *testing.T) {
 }
 
 func TestParseSchema_Users(t *testing.T) {
-	data, err := os.ReadFile("../../testdata/users/type.json")
+	data, err := os.ReadFile("../../testdata/users/users.json")
 	if err != nil {
-		t.Fatalf("read type.json: %v", err)
+		t.Fatalf("read users.json: %v", err)
 	}
 
 	schema, err := parseSchema(data)

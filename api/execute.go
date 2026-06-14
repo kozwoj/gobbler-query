@@ -157,7 +157,7 @@ func collectSchemas(node logical.LogicalNode, cat catalog.Catalog, out map[strin
 		if err != nil {
 			return fmt.Errorf("resolve %q: %w", src.TypeName, err)
 		}
-		schema, err := source.LoadSchema(typeDir)
+		schema, err := source.LoadSchema(typeDir, src.TypeName)
 		if err != nil {
 			return fmt.Errorf("load schema for %q: %w", src.TypeName, err)
 		}

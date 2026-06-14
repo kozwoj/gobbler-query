@@ -46,7 +46,7 @@ type FileTableReader struct {
 	fileIdx     int         // index of the currently open file in files
 	file        *os.File    // currently open file handle
 	csv         *csv.Reader // wraps file
-	schema      *Schema     // parsed once from type.json
+	schema      *Schema     // parsed once from {typeName}.json
 	typeName    string      // stored as Origin in every ColumnMeta
 	batchSize   int
 	start       time.Time       // zero = open lower bound
@@ -62,11 +62,11 @@ type FileTableReader struct {
 //   - start, end: time window bounds (zero value = open bound).
 //   - batchSize: maximum rows per batch.
 //
-// Loads type.json and opens the first selected file during construction so
+// Loads {typeName}.json and opens the first selected file during construction so
 // that schema field-count errors are caught before any GetNextBatch call.
 func NewFileTableReader(typeDir, typeName string, start, end time.Time, batchSize int) (*FileTableReader, error) {
-	// Parse schema from type.json
-	schemaData, err := os.ReadFile(filepath.Join(typeDir, "type.json"))
+	// Parse schema from {typeName}.json
+	schemaData, err := os.ReadFile(filepath.Join(typeDir, typeName+".json"))
 	if err != nil {
 		return nil, fmt.Errorf("NewFileTableReader: %w", err)
 	}

@@ -39,7 +39,7 @@ func countAllRows(t *testing.T, r TableReader) int {
 func TestFileTableReader_MissingTypeJSON(t *testing.T) {
 	_, err := NewFileTableReader(t.TempDir(), "requests", time.Time{}, time.Time{}, testBatchSize)
 	if err == nil {
-		t.Fatal("expected error for missing type.json, got nil")
+		t.Fatal("expected error for missing {typeName}.json, got nil")
 	}
 }
 
