@@ -16,7 +16,7 @@ import (
 const defaultBatchSize = 512
 
 // BuildPhysical translates a validated logical plan into a physical operator
-// tree ready to execute. schemas must contain a source.Schema for every table
+// tree ready to execute. Arguments must contain a source.Schema for every table
 // referenced in the plan (they are used here for column-type resolution when
 // building project and summarize operators).
 //

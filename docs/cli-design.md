@@ -1,4 +1,4 @@
-# CLI Design — `gq`
+# CLI Design Overview 
 
 ## Command Structure
 
@@ -15,7 +15,6 @@ Global flags accepted by every command:
 ```
 
 ---
-
 ## Help Behaviour
 
 Help is printed automatically at three levels. All help paths exit **0**.
@@ -218,11 +217,3 @@ export GOBBLER_KEY_ARCHIVEACCOUNT="sv=2023-..."
 
 Only the account keys for tables that are actually referenced by the query need to be
 set — unused accounts are not checked.
-
----
-
-## Open Questions
-
-- Interactive REPL mode (multi-line query editing) — phase 2.
-- Paging for large `table` output (`less`-style) — phase 2.
-- `gq query explain "<gql>"` — print the logical/physical plan instead of results — phase 2.
