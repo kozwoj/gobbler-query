@@ -7,14 +7,14 @@ import (
 )
 
 // ScalarEval evaluates a compiled scalar expression for one row of a batch.
-// Returns the concrete value (one of int32, int64, float64, string, bool,
-// time.Time, time.Duration), a null flag, and an error.
-type ScalarEval func(b *batch.Batch, row int) (any, bool, error)
+// Returns the typed Value for that row, or an error.
+// A null result is represented as Value{Kind: KindNull}.
+type ScalarEval func(b *batch.Batch, row int) (Value, error)
 
 // CompileScalar wraps an ast.ScalarExpr into a ScalarEval.
 // Column resolution and type checking happen at evaluation time.
 func CompileScalar(e ast.ScalarExpr) ScalarEval {
-	return func(b *batch.Batch, row int) (any, bool, error) {
+	return func(b *batch.Batch, row int) (Value, error) {
 		return evalScalar(e, b, row)
 	}
 }

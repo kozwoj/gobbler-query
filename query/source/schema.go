@@ -5,20 +5,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/kozwoj/gobbler-query/query/batch"
 )
 
-// ColumnType identifies the data type of a column.
-type ColumnType int
+// ColumnType is an alias for batch.ColumnType, kept so that existing callers
+// using source.ColumnType and source.TypeXxx constants continue to compile
+// without changes.
+type ColumnType = batch.ColumnType
 
 const (
-	TypeInt32   ColumnType = iota
-	TypeFloat64            // Gobbler type "real"
-	TypeString
-	TypeBool
-	TypeDatetime
-	TypeTimespan // Go duration string, e.g. "1h10m10s"; stored as time.Duration
-	TypeDynamic  // opaque; stored as unquoted JSON string
-	TypeInt64    // not a native Gobbler source type; produced by arithmetic and aggregation
+	TypeInt32    = batch.TypeInt32
+	TypeFloat64  = batch.TypeFloat64
+	TypeString   = batch.TypeString
+	TypeBool     = batch.TypeBool
+	TypeDatetime = batch.TypeDatetime
+	TypeTimespan = batch.TypeTimespan
+	TypeDynamic  = batch.TypeDynamic
+	TypeInt64    = batch.TypeInt64
 )
 
 // ColumnSchema describes a single column's name and type.

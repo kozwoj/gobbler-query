@@ -11,7 +11,6 @@ import (
 // typedColumn is the internal column representation used during plan validation.
 // It extends batch.ColumnMeta with a source.ColumnType so the validator can
 // check arithmetic and comparison type compatibility.
-// The Type field is stripped when the public []batch.ColumnMeta is returned.
 type typedColumn struct {
 	Name   string
 	Origin string
@@ -23,7 +22,7 @@ type typedSchema []typedColumn
 func (ts typedSchema) toColumnMeta() []batch.ColumnMeta {
 	meta := make([]batch.ColumnMeta, len(ts))
 	for i, col := range ts {
-		meta[i] = batch.ColumnMeta{Name: col.Name, Origin: col.Origin}
+		meta[i] = batch.ColumnMeta{Name: col.Name, Origin: col.Origin, Type: col.Type}
 	}
 	return meta
 }

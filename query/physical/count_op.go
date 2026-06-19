@@ -35,7 +35,7 @@ func (op *CountOp) Next() (*batch.Batch, error) {
 	op.emitted = true
 	return &batch.Batch{
 		Length: 1,
-		Schema: []batch.ColumnMeta{{Name: "count", Origin: ""}},
+		Schema: []batch.ColumnMeta{{Name: "count", Origin: "", Type: batch.TypeInt64}},
 		Columns: []batch.ColumnVector{
 			&batch.Int64Vector{Values: []int64{op.count}},
 		},

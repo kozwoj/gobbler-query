@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/kozwoj/gobbler-query/query/batch"
+	"github.com/kozwoj/gobbler-query/query/expr"
 )
 
 // HashJoinOp is a semi-blocking operator that implements the join stage. The stage joins
@@ -38,15 +39,15 @@ type HashJoinOp struct {
 	// ── right-side build phase state (populated on first Next()) ────────────
 
 	built      bool
-	buildMat   materializedRows // all right-side rows in row-major form
+	buildMat   rowStore         // all right-side rows in encoded form
 	buildIndex map[string][]int // join key → row indices into buildMat
 
-	// ── join phase state ─────────────────────────────────────────────────────
+	// ── join phase state ─────────────────────────────────────────────
 
-	leftBatch     *batch.Batch     // current left batch being joined
-	leftRow       int              // next row index to join in leftBatch
-	pending       materializedRows // output rows accumulated from matches, not yet emitted
-	pendingOffset int              // next row to emit from pending
+	leftBatch     *batch.Batch // current left batch being joined
+	leftRow       int          // next row index to join in leftBatch
+	pending       rowStore     // output rows accumulated from matches, not yet emitted
+	pendingOffset int          // next row to emit from pending
 }
 
 // buildHashTable drains the Right subtree and loads all rows into buildMat
@@ -61,13 +62,12 @@ func (op *HashJoinOp) buildHashTable() error {
 		if err != nil {
 			return err
 		}
-		startIdx := len(op.buildMat.Rows)
+		startIdx := op.buildMat.rowCount()
 		if err := op.buildMat.appendBatch(b); err != nil {
 			return err
 		}
-		// Index each newly appended row.
-		for i := startIdx; i < len(op.buildMat.Rows); i++ {
-			k := groupKey(op.buildMat.Rows[i], op.buildMat.Nulls[i], op.RightKeyIdxs)
+		for i := startIdx; i < op.buildMat.rowCount(); i++ {
+			k := groupKeyFromValues(op.buildMat.keyValues(i, op.RightKeyIdxs))
 			op.buildIndex[k] = append(op.buildIndex[k], i)
 		}
 	}
@@ -75,9 +75,9 @@ func (op *HashJoinOp) buildHashTable() error {
 }
 
 func (op *HashJoinOp) Close() error {
-	op.buildMat = materializedRows{}
+	op.buildMat = rowStore{}
 	op.buildIndex = nil
-	op.pending = materializedRows{}
+	op.pending = rowStore{}
 	leftErr := op.Left.Close()
 	rightErr := op.Right.Close()
 	if leftErr != nil {
@@ -97,8 +97,8 @@ func (op *HashJoinOp) Next() (*batch.Batch, error) {
 		op.built = true
 		// Seed pending with the output schema/kinds so buildBatchFromRows
 		// produces correctly-typed vectors even for all-null columns.
-		op.pending.Schema = op.OutSchema
-		op.pending.ColKinds = op.OutKinds
+		op.pending.schema = op.OutSchema
+		op.pending.kinds = op.OutKinds
 	}
 
 	bs := op.BatchSize
@@ -108,18 +108,17 @@ func (op *HashJoinOp) Next() (*batch.Batch, error) {
 
 	for {
 		// Emit accumulated output rows if available.
-		if op.pendingOffset < len(op.pending.Rows) {
+		if op.pendingOffset < op.pending.rowCount() {
 			end := op.pendingOffset + bs
-			if end > len(op.pending.Rows) {
-				end = len(op.pending.Rows)
+			if end > op.pending.rowCount() {
+				end = op.pending.rowCount()
 			}
 			b := op.pending.buildBatchFromRows(op.pendingOffset, end)
 			op.pendingOffset = end
 			return b, nil
 		}
 		// All pending rows emitted — reset for next round.
-		op.pending.Rows = op.pending.Rows[:0]
-		op.pending.Nulls = op.pending.Nulls[:0]
+		op.pending.rows = op.pending.rows[:0]
 		op.pendingOffset = 0
 
 		// Fetch the next left batch when the current one is exhausted.
@@ -137,27 +136,20 @@ func (op *HashJoinOp) Next() (*batch.Batch, error) {
 
 		// Process left rows until we have enough pending output or the batch is done.
 		for op.leftRow < op.leftBatch.Length {
-			leftVals, leftNulls, err := extractRowFromBatch(op.leftBatch, op.leftRow)
-			if err != nil {
-				return nil, err
-			}
-			k := groupKey(leftVals, leftNulls, op.LeftKeyIdxs)
+			k := groupKeyFromValues(batchKeyValues(op.leftBatch, op.leftRow, op.LeftKeyIdxs))
 			if matches, ok := op.buildIndex[k]; ok {
+				leftVals := batchRowValues(op.leftBatch, op.leftRow)
+				nLeft := len(leftVals)
+				nRight := len(op.buildMat.schema)
 				for _, rIdx := range matches {
-					rightVals := op.buildMat.Rows[rIdx]
-					rightNulls := op.buildMat.Nulls[rIdx]
-					combined := make([]any, len(leftVals)+len(rightVals))
-					combinedNulls := make([]bool, len(leftNulls)+len(rightNulls))
+					combined := make([]expr.Value, nLeft+nRight)
 					copy(combined, leftVals)
-					copy(combined[len(leftVals):], rightVals)
-					copy(combinedNulls, leftNulls)
-					copy(combinedNulls[len(leftNulls):], rightNulls)
-					op.pending.Rows = append(op.pending.Rows, combined)
-					op.pending.Nulls = append(op.pending.Nulls, combinedNulls)
+					copy(combined[nLeft:], op.buildMat.rowValues(rIdx))
+					op.pending.appendValues(combined)
 				}
 			}
 			op.leftRow++
-			if len(op.pending.Rows) >= bs {
+			if op.pending.rowCount() >= bs {
 				break
 			}
 		}
@@ -166,20 +158,4 @@ func (op *HashJoinOp) Next() (*batch.Batch, error) {
 	}
 }
 
-// extractRowFromBatch extracts all values and null flags for a single row from b.
-func extractRowFromBatch(b *batch.Batch, row int) ([]any, []bool, error) {
-	vals := make([]any, len(b.Columns))
-	nulls := make([]bool, len(b.Columns))
-	for col, cv := range b.Columns {
-		if cv.IsNull(row) {
-			nulls[col] = true
-			continue
-		}
-		v, err := extractCell(cv, row)
-		if err != nil {
-			return nil, nil, err
-		}
-		vals[col] = v
-	}
-	return vals, nulls, nil
-}
+// (extractRowFromBatch removed — replaced by batchRowValues/batchKeyValues in rows.go)

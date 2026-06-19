@@ -3,8 +3,10 @@ package physical
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/kozwoj/gobbler-query/query/batch"
+	"github.com/kozwoj/gobbler-query/query/expr"
 )
 
 // fakeOperator is a test helper that replays a fixed slice of batches.
@@ -69,11 +71,7 @@ func drainAll(t *testing.T, op Operator) (rows [][]any, nulls [][]bool) {
 				if cv.IsNull(row) {
 					rNulls[col] = true
 				} else {
-					v, err := extractCell(cv, row)
-					if err != nil {
-						t.Fatalf("extractCell: %v", err)
-					}
-					rVals[col] = v
+					rVals[col] = exprValueToAny(batchCellValue(cv, row))
 				}
 			}
 			rows = append(rows, rVals)
@@ -81,4 +79,27 @@ func drainAll(t *testing.T, op Operator) (rows [][]any, nulls [][]bool) {
 		}
 	}
 	return
+}
+
+// exprValueToAny converts an expr.Value to its equivalent Go interface value
+// for use in drainAll comparisons.
+func exprValueToAny(v expr.Value) any {
+	switch v.Kind {
+	case expr.KindInt32:
+		return int32(v.I)
+	case expr.KindInt64:
+		return v.I
+	case expr.KindFloat64:
+		return v.F
+	case expr.KindBool:
+		return v.I != 0
+	case expr.KindString, expr.KindDynamic:
+		return v.S
+	case expr.KindDatetime:
+		return time.Unix(0, v.I)
+	case expr.KindTimespan:
+		return time.Duration(v.I)
+	default:
+		return nil
+	}
 }

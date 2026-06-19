@@ -129,7 +129,7 @@ type SortOp struct {
 	Keys      []CompiledSortKey
 	BatchSize int // rows per output batch; defaults to defaultSortBatchSize
 
-	rows   *materializedRows
+	rows   *rowStore
 	offset int
 }
 
@@ -140,7 +140,7 @@ func (s *SortOp) Next() (*batch.Batch, error) {
 			return nil, err
 		}
 	}
-	if s.offset >= len(s.rows.Rows) {
+	if s.offset >= s.rows.rowCount() {
 		return nil, io.EOF
 	}
 	bs := s.BatchSize
@@ -148,8 +148,8 @@ func (s *SortOp) Next() (*batch.Batch, error) {
 		bs = defaultSortBatchSize
 	}
 	end := s.offset + bs
-	if end > len(s.rows.Rows) {
-		end = len(s.rows.Rows)
+	if end > s.rows.rowCount() {
+		end = s.rows.rowCount()
 	}
 	b := s.rows.buildBatchFromRows(s.offset, end)
 	s.offset = end
@@ -161,13 +161,9 @@ func (s *SortOp) Close() error {
 	return s.Input.Close()
 }
 
-// materialize drains the input into m, then sorts m.Rows and m.Nulls together.
+// materialize drains the input into m, then reorders m.rows via index permutation.
 func (s *SortOp) materialize() error {
-	// Phase 1: consume all input batches into row-major storage.
-	// appendBatch converts each columnar batch into [][]any rows so that
-	// compareRows can access individual cell values by column index without
-	// repeated type assertions against ColumnVector slices.
-	m := &materializedRows{}
+	m := &rowStore{}
 	for {
 		b, err := s.Input.Next()
 		if err == io.EOF {
@@ -181,33 +177,21 @@ func (s *SortOp) materialize() error {
 		}
 	}
 
-	// Phase 2: sort via an index permutation.
-	// m.Rows and m.Nulls are parallel slices — row i's values are in m.Rows[i]
-	// and its null flags in m.Nulls[i]. Sorting m.Rows directly (e.g. with
-	// sort.SliceStable(m.Rows, less)) would leave m.Nulls in the original order,
-	// corrupting the null flags for every row that moved.
-	//
-	// Instead we sort a plain integer index slice [0, 1, ..., n-1] using the
-	// same comparator. Once the index is in sorted order we build new Rows and
-	// Nulls slices by reading from the original slices in permuted order.
-	// This keeps both slices in sync without copying any cell data.
+	// Sort via an index permutation so the encodedRow slice stays contiguous.
 	keys := s.Keys
-	n := len(m.Rows)
+	n := m.rowCount()
 	indices := make([]int, n)
 	for i := range indices {
 		indices[i] = i
 	}
 	sort.SliceStable(indices, func(i, j int) bool {
-		return compareRows(m.Rows[indices[i]], m.Rows[indices[j]], m.Nulls[indices[i]], m.Nulls[indices[j]], keys)
+		return m.compare(indices[i], indices[j], keys)
 	})
-	newRows := make([][]any, n)
-	newNulls := make([][]bool, n)
+	sorted := make([]encodedRow, n)
 	for i, idx := range indices {
-		newRows[i] = m.Rows[idx]
-		newNulls[i] = m.Nulls[idx]
+		sorted[i] = m.rows[idx]
 	}
-	m.Rows = newRows
-	m.Nulls = newNulls
+	m.rows = sorted
 	s.rows = m
 	return nil
 }

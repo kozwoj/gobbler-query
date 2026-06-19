@@ -227,7 +227,7 @@ func (r *FileTableReader) GetNextBatch() (*batch.Batch, error) {
 	meta := make([]batch.ColumnMeta, len(r.schema.Columns))
 	for i, cb := range r.colBuilders {
 		cols[i] = cb.FinalizeColumn(rows)
-		meta[i] = batch.ColumnMeta{Name: r.schema.Columns[i].Name, Origin: r.typeName}
+		meta[i] = batch.ColumnMeta{Name: r.schema.Columns[i].Name, Origin: r.typeName, Type: r.schema.Columns[i].Type}
 		cb.Reset()
 	}
 	return &batch.Batch{Length: rows, Schema: meta, Columns: cols}, nil

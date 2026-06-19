@@ -24,7 +24,7 @@ func (op *ProjectOp) Next() (*batch.Batch, error) {
 	cols := make([]batch.ColumnVector, len(op.Items))
 
 	for i, item := range op.Items {
-		schema[i] = batch.ColumnMeta{Name: item.Name, Origin: item.Origin}
+		schema[i] = batch.ColumnMeta{Name: item.Name, Origin: item.Origin, Type: item.Type}
 		col, err := evalProjectColumn(item.Eval, VecKindFromColumnType(item.Type), b)
 		if err != nil {
 			return nil, err
@@ -46,116 +46,122 @@ func (op *ProjectOp) Close() error {
 // kind is used to produce the correct all-null vector when every row evaluates to null.
 func evalProjectColumn(eval expr.ScalarEval, kind VecKind, b *batch.Batch) (batch.ColumnVector, error) {
 	n := b.Length
-	vals := make([]any, n)
-	nullFlags := make([]bool, n)
+	vals := make([]expr.Value, n)
 	for row := 0; row < n; row++ {
-		v, isNull, err := eval(b, row)
+		v, err := eval(b, row)
 		if err != nil {
 			return nil, err
 		}
 		vals[row] = v
-		nullFlags[row] = isNull
 	}
-	return buildVectorTyped(vals, nullFlags, kind), nil
+	return buildVectorFromValues(vals, kind), nil
 }
 
-// buildVectorTyped creates a typed ColumnVector from a slice of any values.
-// The concrete vector type is inferred from the first non-null value.
-// When all values are null, kind determines the output vector type.
-func buildVectorTyped(vals []any, nullFlags []bool, kind VecKind) batch.ColumnVector {
+// buildVectorFromValues builds a typed ColumnVector from a slice of Value.
+// All-null columns use kind to choose the correct vector type.
+func buildVectorFromValues(vals []expr.Value, kind VecKind) batch.ColumnVector {
+	n := len(vals)
+	nullFlags := make([]bool, n)
 	for i, v := range vals {
-		if nullFlags[i] {
-			continue
-		}
-		switch v.(type) {
-		case int32:
-			return buildInt32Vector(vals, nullFlags)
-		case int64:
-			return buildInt64Vector(vals, nullFlags)
-		case float64:
-			return buildFloat64Vector(vals, nullFlags)
-		case string:
-			return buildStringVector(vals, nullFlags)
-		case bool:
-			return buildBoolVector(vals, nullFlags)
-		case time.Time:
-			return buildDatetimeVector(vals, nullFlags)
-		case time.Duration:
-			return buildTimespanVector(vals, nullFlags)
+		nullFlags[i] = v.Kind == expr.KindNull
+	}
+	// Determine the actual kind from the first non-null value.
+	actualKind := kind
+	for _, v := range vals {
+		if v.Kind != expr.KindNull {
+			actualKind = vecKindFromValueKind(v.Kind)
+			break
 		}
 	}
-	// all null — use the known kind to build the correctly-typed vector
-	return emptyTypedVector(kind, len(vals), packNullBits(nullFlags))
+	nullBits := packNullBits(nullFlags)
+	switch actualKind {
+	case vecInt32:
+		out := &batch.Int32Vector{Values: make([]int32, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = int32(v.I)
+			}
+		}
+		return out
+	case vecInt64:
+		out := &batch.Int64Vector{Values: make([]int64, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = v.I
+			}
+		}
+		return out
+	case vecFloat64:
+		out := &batch.Float64Vector{Values: make([]float64, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = v.F
+			}
+		}
+		return out
+	case vecString:
+		out := &batch.StringVector{Values: make([]string, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = v.S
+			}
+		}
+		return out
+	case vecBool:
+		out := &batch.BoolVector{Values: make([]bool, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = v.I != 0
+			}
+		}
+		return out
+	case vecDatetime:
+		out := &batch.DatetimeVector{Values: make([]time.Time, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = time.Unix(0, v.I)
+			}
+		}
+		return out
+	case vecTimespan:
+		out := &batch.TimespanVector{Values: make([]time.Duration, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = time.Duration(v.I)
+			}
+		}
+		return out
+	default: // vecDynamic
+		out := &batch.DynamicVector{Values: make([]string, n), Nulls: nullBits}
+		for i, v := range vals {
+			if !nullFlags[i] {
+				out.Values[i] = v.S
+			}
+		}
+		return out
+	}
 }
 
-func buildInt32Vector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.Int32Vector{Values: make([]int32, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(int32)
-		}
+// vecKindFromValueKind maps a ValueKind to the corresponding VecKind.
+func vecKindFromValueKind(k expr.ValueKind) VecKind {
+	switch k {
+	case expr.KindInt32:
+		return vecInt32
+	case expr.KindInt64:
+		return vecInt64
+	case expr.KindFloat64:
+		return vecFloat64
+	case expr.KindString:
+		return vecString
+	case expr.KindBool:
+		return vecBool
+	case expr.KindDatetime:
+		return vecDatetime
+	case expr.KindTimespan:
+		return vecTimespan
+	default:
+		return vecDynamic
 	}
-	return v
-}
-
-func buildInt64Vector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.Int64Vector{Values: make([]int64, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(int64)
-		}
-	}
-	return v
-}
-
-func buildFloat64Vector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.Float64Vector{Values: make([]float64, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(float64)
-		}
-	}
-	return v
-}
-
-func buildStringVector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.StringVector{Values: make([]string, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(string)
-		}
-	}
-	return v
-}
-
-func buildBoolVector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.BoolVector{Values: make([]bool, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(bool)
-		}
-	}
-	return v
-}
-
-func buildDatetimeVector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.DatetimeVector{Values: make([]time.Time, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(time.Time)
-		}
-	}
-	return v
-}
-
-func buildTimespanVector(vals []any, nullFlags []bool) batch.ColumnVector {
-	v := &batch.TimespanVector{Values: make([]time.Duration, len(vals)), Nulls: packNullBits(nullFlags)}
-	for i, x := range vals {
-		if !nullFlags[i] {
-			v.Values[i] = x.(time.Duration)
-		}
-	}
-	return v
 }
 
 // packNullBits converts a bool slice into a packed uint64 bitset.

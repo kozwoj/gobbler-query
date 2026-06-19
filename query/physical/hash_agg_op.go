@@ -22,7 +22,7 @@ type HashAggregateOp struct {
 	BatchSize int                    // rows per output batch; defaults to defaultSortBatchSize
 
 	// populated on first Next()
-	result *materializedRows
+	result *rowStore
 	offset int
 }
 
@@ -37,9 +37,8 @@ type GroupByCol struct {
 
 // aggGroup holds the per-group accumulators and the captured group-by values.
 type aggGroup struct {
-	accs    []expr.AggAccumulator
-	byVals  []any
-	byNulls []bool
+	accs   []expr.AggAccumulator
+	byVals []expr.Value // null represented as Value{Kind: KindNull}
 }
 
 func (op *HashAggregateOp) Next() (*batch.Batch, error) {
@@ -48,7 +47,7 @@ func (op *HashAggregateOp) Next() (*batch.Batch, error) {
 			return nil, err
 		}
 	}
-	if op.offset >= len(op.result.Rows) {
+	if op.offset >= op.result.rowCount() {
 		return nil, io.EOF
 	}
 	bs := op.BatchSize
@@ -56,8 +55,8 @@ func (op *HashAggregateOp) Next() (*batch.Batch, error) {
 		bs = defaultSortBatchSize
 	}
 	end := op.offset + bs
-	if end > len(op.result.Rows) {
-		end = len(op.result.Rows)
+	if end > op.result.rowCount() {
+		end = op.result.rowCount()
 	}
 	b := op.result.buildBatchFromRows(op.offset, end)
 	op.offset = end
@@ -86,21 +85,17 @@ func (op *HashAggregateOp) aggregate() error {
 
 		for row := 0; row < b.Length; row++ {
 			// Evaluate group-by columns for this row.
-			byVals := make([]any, len(op.GroupBy))
-			byNulls := make([]bool, len(op.GroupBy))
+			byVals := make([]expr.Value, len(op.GroupBy))
 			for i, gc := range op.GroupBy {
-				v, null, err := gc.Eval(b, row)
+				v, err := gc.Eval(b, row)
 				if err != nil {
 					return err
 				}
-				byNulls[i] = null
-				if !null {
-					byVals[i] = v
-				}
+				byVals[i] = v
 			}
 
 			// Build the map key from group-by values.
-			key := groupKey(byVals, byNulls, seqIndices(len(op.GroupBy)))
+			key := groupKeyFromValues(byVals)
 
 			// Look up or create the group.
 			g, ok := groups[key]
@@ -109,61 +104,51 @@ func (op *HashAggregateOp) aggregate() error {
 				for i, a := range op.Aggs {
 					accs[i] = a.NewAcc()
 				}
-				g = &aggGroup{accs: accs, byVals: byVals, byNulls: byNulls}
+				g = &aggGroup{accs: accs, byVals: byVals}
 				groups[key] = g
 				groupOrder = append(groupOrder, key)
 			}
 
 			// Feed each accumulator.
 			for i, a := range op.Aggs {
-				var val any
-				var null bool
-				if a.Eval == nil {
-					// count() — always ingest a non-null sentinel
-					val, null = nil, false
-				} else {
+				var v expr.Value
+				if a.Eval != nil {
 					var err error
-					val, null, err = a.Eval(b, row)
+					v, err = a.Eval(b, row)
 					if err != nil {
 						return err
 					}
 				}
-				g.accs[i].Ingest(val, null)
+				// For count(), v stays zero-value (KindNull == 0), which is fine:
+				// countAcc.Ingest ignores the value entirely.
+				g.accs[i].Ingest(v)
 			}
 		}
 	}
 
-	// Build the result materializedRows from the groups.
-	m := &materializedRows{}
-	m.Schema = op.buildOutputSchema()
+	// Build the result rowStore from the groups.
+	m := &rowStore{
+		schema: op.buildOutputSchema(),
+		kinds:  op.buildColKinds(),
+	}
 	ncols := len(op.Aggs) + len(op.GroupBy)
-	m.ColKinds = op.buildColKinds()
+	vals := make([]expr.Value, ncols)
 
 	for _, key := range groupOrder {
 		g := groups[key]
-		row := make([]any, ncols)
-		nulls := make([]bool, ncols)
 
 		// Agg columns first.
 		for i, acc := range g.accs {
-			v, null := acc.Result()
-			nulls[i] = null
-			if !null {
-				row[i] = v
-			}
+			vals[i] = acc.Result()
 		}
 
 		// Group-by columns after.
 		offset := len(op.Aggs)
 		for i, v := range g.byVals {
-			nulls[offset+i] = g.byNulls[i]
-			if !g.byNulls[i] {
-				row[offset+i] = v
-			}
+			vals[offset+i] = v
 		}
 
-		m.Rows = append(m.Rows, row)
-		m.Nulls = append(m.Nulls, nulls)
+		m.appendValues(vals)
 	}
 
 	op.result = m
@@ -175,10 +160,10 @@ func (op *HashAggregateOp) aggregate() error {
 func (op *HashAggregateOp) buildOutputSchema() []batch.ColumnMeta {
 	schema := make([]batch.ColumnMeta, 0, len(op.Aggs)+len(op.GroupBy))
 	for _, a := range op.Aggs {
-		schema = append(schema, batch.ColumnMeta{Name: a.Name})
+		schema = append(schema, batch.ColumnMeta{Name: a.Name, Type: a.Type})
 	}
 	for _, g := range op.GroupBy {
-		schema = append(schema, batch.ColumnMeta{Name: g.Name, Origin: g.Origin})
+		schema = append(schema, batch.ColumnMeta{Name: g.Name, Origin: g.Origin, Type: g.Type})
 	}
 	return schema
 }
@@ -193,13 +178,4 @@ func (op *HashAggregateOp) buildColKinds() []VecKind {
 		kinds = append(kinds, VecKindFromColumnType(g.Type))
 	}
 	return kinds
-}
-
-// seqIndices returns [0, 1, ..., n-1].
-func seqIndices(n int) []int {
-	idx := make([]int, n)
-	for i := range idx {
-		idx[i] = i
-	}
-	return idx
 }

@@ -277,10 +277,10 @@ Baseline: Windows/arm64, Go 1.24, `go test -bench=. -benchmem -count=1 ./query/p
 
 | Benchmark | ns/op (before) | B/op (before) | allocs/op (before) | ns/op (after) | B/op (after) | allocs/op (after) |
 |---|---|---|---|---|---|---|
-| BenchmarkHashAgg_HighCardinality | 42,853,788 | 19,113,341 | 850,412 | — | — | — |
-| BenchmarkHashAgg_LowCardinality | 26,599,375 | 11,536,373 | 740,580 | — | — | — |
-| BenchmarkSort_100k | 62,865,338 | 37,531,297 | 301,439 | — | — | — |
-| BenchmarkHashJoin_10k_x_50 | 4,166,561 | 3,578,349 | 100,691 | — | — | — |
+| BenchmarkHashAgg_HighCardinality | 42,853,788 | 19,113,341 | 850,412 | 23,578,856 | 16,236,689 | 470,366 |
+| BenchmarkHashAgg_LowCardinality | 26,599,375 | 11,536,373 | 740,580 | 11,328,606 | 8,647,389 | 380,228 |
+| BenchmarkSort_100k | 62,865,338 | 37,531,297 | 301,439 | 126,939,788 | 55,270,172 | 201,410 |
+| BenchmarkHashJoin_10k_x_50 | 4,166,561 | 3,578,349 | 100,691 | 5,660,988 | 7,952,732 | 144,092 |
 
 ---
 
@@ -292,4 +292,4 @@ Baseline: Windows/arm64, Go 1.24, `go test -bench=. -benchmem -count=1 ./query/p
 4. **Typed accumulators (Step 2)** — depends on Step 1 (`Value`).
 5. **Binary group keys (Step 4)** — depends on Step 1 (`Value`); isolated, immediate benchmark payoff.
 6. **Row store (Step 3)** — depends on Step 2 (`ColumnMeta.Type`) and Step 1 (`Value`). Replace `materializedRows` with `rowStore`; migrate `SortOp`, `HashJoinOp`, `HashAggregateOp`.
-7. **Benchmark** — run before step 1 (baseline) and after step 6 (result); fill in table below.
+7. **Benchmark** — run before step 1 (baseline) and after step 6 (result); fill in table above.

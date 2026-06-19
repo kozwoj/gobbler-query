@@ -10,9 +10,38 @@ import (
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+// anyToValue converts a raw Go value to a Value for use in tests.
+// nil becomes KindNull.
+func anyToValue(v any) Value {
+	switch x := v.(type) {
+	case nil:
+		return Value{Kind: KindNull}
+	case int32:
+		return Value{Kind: KindInt32, I: int64(x)}
+	case int64:
+		return Value{Kind: KindInt64, I: x}
+	case float64:
+		return Value{Kind: KindFloat64, F: x}
+	case bool:
+		i := int64(0)
+		if x {
+			i = 1
+		}
+		return Value{Kind: KindBool, I: i}
+	case string:
+		return Value{Kind: KindString, S: x}
+	case time.Time:
+		return Value{Kind: KindDatetime, I: x.UnixNano()}
+	case time.Duration:
+		return Value{Kind: KindTimespan, I: int64(x)}
+	default:
+		panic("anyToValue: unsupported type")
+	}
+}
+
 func ingest(acc AggAccumulator, vals ...any) {
 	for _, v := range vals {
-		acc.Ingest(v, v == nil)
+		acc.Ingest(anyToValue(v))
 	}
 }
 
@@ -21,23 +50,23 @@ func ingest(acc AggAccumulator, vals ...any) {
 func TestCountAcc_CountsRows(t *testing.T) {
 	a := &countAcc{}
 	ingest(a, int32(1), nil, int32(3))
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("count result should not be null")
 	}
-	if got.(int64) != 3 {
-		t.Errorf("count = %v, want 3", got)
+	if got.I != 3 {
+		t.Errorf("count = %v, want 3", got.I)
 	}
 }
 
 func TestCountAcc_Empty(t *testing.T) {
 	a := &countAcc{}
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("empty count should not be null")
 	}
-	if got.(int64) != 0 {
-		t.Errorf("empty count = %v, want 0", got)
+	if got.I != 0 {
+		t.Errorf("empty count = %v, want 0", got.I)
 	}
 }
 
@@ -46,12 +75,12 @@ func TestCountAcc_Empty(t *testing.T) {
 func TestSumInt64Acc_Int64Values(t *testing.T) {
 	a := &sumInt64Acc{}
 	ingest(a, int64(10), int64(20), nil, int64(5))
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("sum result should not be null")
 	}
-	if got.(int64) != 35 {
-		t.Errorf("sum = %v, want 35", got)
+	if got.I != 35 {
+		t.Errorf("sum = %v, want 35", got.I)
 	}
 }
 
@@ -59,24 +88,24 @@ func TestSumInt64Acc_Int32Values(t *testing.T) {
 	// int32 inputs are widened to int64 by the accumulator
 	a := &sumInt64Acc{}
 	ingest(a, int32(3), int32(4))
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("sum result should not be null")
 	}
-	if got.(int64) != 7 {
-		t.Errorf("sum = %v, want 7", got)
+	if got.I != 7 {
+		t.Errorf("sum = %v, want 7", got.I)
 	}
 }
 
 func TestSumInt64Acc_AllNull(t *testing.T) {
 	a := &sumInt64Acc{}
 	ingest(a, nil, nil)
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("sum result should not be null even when all inputs are null")
 	}
-	if got.(int64) != 0 {
-		t.Errorf("all-null sum = %v, want 0", got)
+	if got.I != 0 {
+		t.Errorf("all-null sum = %v, want 0", got.I)
 	}
 }
 
@@ -85,12 +114,12 @@ func TestSumInt64Acc_AllNull(t *testing.T) {
 func TestSumFloat64Acc_Basic(t *testing.T) {
 	a := &sumFloat64Acc{}
 	ingest(a, 1.5, nil, 2.5)
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("sum result should not be null")
 	}
-	if got.(float64) != 4.0 {
-		t.Errorf("sum = %v, want 4.0", got)
+	if got.F != 4.0 {
+		t.Errorf("sum = %v, want 4.0", got.F)
 	}
 }
 
@@ -99,41 +128,41 @@ func TestSumFloat64Acc_Basic(t *testing.T) {
 func TestAvgAcc_Float64(t *testing.T) {
 	a := &avgAcc{}
 	ingest(a, 10.0, 20.0, 30.0)
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("avg result should not be null")
 	}
-	if got.(float64) != 20.0 {
-		t.Errorf("avg = %v, want 20.0", got)
+	if got.F != 20.0 {
+		t.Errorf("avg = %v, want 20.0", got.F)
 	}
 }
 
 func TestAvgAcc_Int32(t *testing.T) {
 	a := &avgAcc{}
 	ingest(a, int32(1), int32(3))
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("avg result should not be null")
 	}
-	if got.(float64) != 2.0 {
-		t.Errorf("avg = %v, want 2.0", got)
+	if got.F != 2.0 {
+		t.Errorf("avg = %v, want 2.0", got.F)
 	}
 }
 
 func TestAvgAcc_SkipsNulls(t *testing.T) {
 	a := &avgAcc{}
 	ingest(a, nil, 10.0, nil, 20.0)
-	got, _ := a.Result()
-	if got.(float64) != 15.0 {
-		t.Errorf("avg skipping nulls = %v, want 15.0", got)
+	got := a.Result()
+	if got.F != 15.0 {
+		t.Errorf("avg skipping nulls = %v, want 15.0", got.F)
 	}
 }
 
 func TestAvgAcc_AllNull_ReturnsNull(t *testing.T) {
 	a := &avgAcc{}
 	ingest(a, nil, nil)
-	_, null := a.Result()
-	if !null {
+	got := a.Result()
+	if got.Kind != KindNull {
 		t.Error("all-null avg should return null")
 	}
 }
@@ -141,19 +170,19 @@ func TestAvgAcc_AllNull_ReturnsNull(t *testing.T) {
 // ─── cmpVal ──────────────────────────────────────────────────────────────────
 
 func TestCmpVal_Int32(t *testing.T) {
-	if cmpVal(int32(1), int32(2)) != -1 {
+	if CmpValue(anyToValue(int32(1)), anyToValue(int32(2))) != -1 {
 		t.Error("1 < 2")
 	}
-	if cmpVal(int32(2), int32(2)) != 0 {
+	if CmpValue(anyToValue(int32(2)), anyToValue(int32(2))) != 0 {
 		t.Error("2 == 2")
 	}
-	if cmpVal(int32(3), int32(2)) != 1 {
+	if CmpValue(anyToValue(int32(3)), anyToValue(int32(2))) != 1 {
 		t.Error("3 > 2")
 	}
 }
 
 func TestCmpVal_Float64(t *testing.T) {
-	if cmpVal(1.0, 2.0) != -1 {
+	if CmpValue(anyToValue(1.0), anyToValue(2.0)) != -1 {
 		t.Error("1.0 < 2.0")
 	}
 }
@@ -161,16 +190,16 @@ func TestCmpVal_Float64(t *testing.T) {
 func TestCmpVal_Datetime(t *testing.T) {
 	earlier := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	later := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
-	if cmpVal(earlier, later) != -1 {
+	if CmpValue(anyToValue(earlier), anyToValue(later)) != -1 {
 		t.Error("earlier < later")
 	}
-	if cmpVal(later, later) != 0 {
+	if CmpValue(anyToValue(later), anyToValue(later)) != 0 {
 		t.Error("equal datetimes")
 	}
 }
 
 func TestCmpVal_Timespan(t *testing.T) {
-	if cmpVal(time.Second, 2*time.Second) != -1 {
+	if CmpValue(anyToValue(time.Second), anyToValue(2*time.Second)) != -1 {
 		t.Error("1s < 2s")
 	}
 }
@@ -180,32 +209,32 @@ func TestCmpVal_Timespan(t *testing.T) {
 func TestMinAcc_Int32(t *testing.T) {
 	a := &minAcc{}
 	ingest(a, int32(5), int32(2), int32(8))
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("min should not be null")
 	}
-	if got.(int32) != 2 {
-		t.Errorf("min = %v, want 2", got)
+	if int32(got.I) != 2 {
+		t.Errorf("min = %v, want 2", got.I)
 	}
 }
 
 func TestMinAcc_SkipsNulls(t *testing.T) {
 	a := &minAcc{}
 	ingest(a, nil, int32(3), nil)
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("min should not be null")
 	}
-	if got.(int32) != 3 {
-		t.Errorf("min = %v, want 3", got)
+	if int32(got.I) != 3 {
+		t.Errorf("min = %v, want 3", got.I)
 	}
 }
 
 func TestMinAcc_AllNull_ReturnsNull(t *testing.T) {
 	a := &minAcc{}
 	ingest(a, nil, nil)
-	_, null := a.Result()
-	if !null {
+	got := a.Result()
+	if got.Kind != KindNull {
 		t.Error("all-null min should return null")
 	}
 }
@@ -215,9 +244,10 @@ func TestMinAcc_Datetime(t *testing.T) {
 	t2 := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
 	a := &minAcc{}
 	ingest(a, t1, t2)
-	got, _ := a.Result()
-	if !got.(time.Time).Equal(t2) {
-		t.Errorf("min datetime = %v, want %v", got, t2)
+	got := a.Result()
+	wantNano := t2.UnixNano()
+	if got.Kind != KindDatetime || got.I != wantNano {
+		t.Errorf("min datetime nano = %v, want %v", got.I, wantNano)
 	}
 }
 
@@ -226,20 +256,20 @@ func TestMinAcc_Datetime(t *testing.T) {
 func TestMaxAcc_Int64(t *testing.T) {
 	a := &maxAcc{}
 	ingest(a, int64(1), int64(9), int64(4))
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("max should not be null")
 	}
-	if got.(int64) != 9 {
-		t.Errorf("max = %v, want 9", got)
+	if got.I != 9 {
+		t.Errorf("max = %v, want 9", got.I)
 	}
 }
 
 func TestMaxAcc_AllNull_ReturnsNull(t *testing.T) {
 	a := &maxAcc{}
 	ingest(a, nil)
-	_, null := a.Result()
-	if !null {
+	got := a.Result()
+	if got.Kind != KindNull {
 		t.Error("all-null max should return null")
 	}
 }
@@ -249,32 +279,32 @@ func TestMaxAcc_AllNull_ReturnsNull(t *testing.T) {
 func TestDcountAcc_CountsDistinct(t *testing.T) {
 	a := &dcountAcc{}
 	ingest(a, "east", "west", "east", "north")
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("dcount should not be null")
 	}
-	if got.(int64) != 3 {
-		t.Errorf("dcount = %v, want 3", got)
+	if got.I != 3 {
+		t.Errorf("dcount = %v, want 3", got.I)
 	}
 }
 
 func TestDcountAcc_SkipsNulls(t *testing.T) {
 	a := &dcountAcc{}
 	ingest(a, nil, "east", nil)
-	got, _ := a.Result()
-	if got.(int64) != 1 {
-		t.Errorf("dcount skipping nulls = %v, want 1", got)
+	got := a.Result()
+	if got.I != 1 {
+		t.Errorf("dcount skipping nulls = %v, want 1", got.I)
 	}
 }
 
 func TestDcountAcc_Empty(t *testing.T) {
 	a := &dcountAcc{}
-	got, null := a.Result()
-	if null {
+	got := a.Result()
+	if got.Kind == KindNull {
 		t.Fatal("empty dcount should not be null")
 	}
-	if got.(int64) != 0 {
-		t.Errorf("empty dcount = %v, want 0", got)
+	if got.I != 0 {
+		t.Errorf("empty dcount = %v, want 0", got.I)
 	}
 }
 

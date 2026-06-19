@@ -2,7 +2,6 @@ package expr
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/kozwoj/gobbler-query/query/ast"
 	"github.com/kozwoj/gobbler-query/query/source"
@@ -10,14 +9,14 @@ import (
 
 // AggAccumulator accumulates values for one aggregation function over a group.
 type AggAccumulator interface {
-	// Ingest adds one row's value. if val is nil and null is true when the source
-	// cell is null. For count(), the operator always passes (nil, false) because
+	// Ingest adds one row's Value. A null input is Value{Kind: KindNull}.
+	// For count(), the operator always passes Value{Kind: KindNull} because
 	// count() counts rows, not values.
-	Ingest(val any, null bool)
-	// Result returns the final aggregate value and a null flag.
-	// The only null results are avg/min/max over an all-null group.
-	// count() and dcount() always return a non-null int64.
-	Result() (any, bool)
+	Ingest(v Value)
+	// Result returns the final aggregate value.
+	// A null result (avg/min/max over an all-null group) is Value{Kind: KindNull}.
+	// count() and dcount() always return a non-null KindInt64 Value.
+	Result() Value
 }
 
 // CompiledAggItem is a ready-to-execute aggregation column.
@@ -127,8 +126,8 @@ func CompileAggItem(item ast.AggItem, outputType source.ColumnType) CompiledAggI
 // (count() in KQL counts rows, not values.)
 type countAcc struct{ n int64 }
 
-func (a *countAcc) Ingest(_ any, _ bool) { a.n++ }
-func (a *countAcc) Result() (any, bool)  { return a.n, false }
+func (a *countAcc) Ingest(_ Value)  { a.n++ }
+func (a *countAcc) Result() Value   { return Value{Kind: KindInt64, I: a.n} }
 
 // ─── sumInt64Acc ─────────────────────────────────────────────────────────────
 
@@ -136,182 +135,125 @@ func (a *countAcc) Result() (any, bool)  { return a.n, false }
 // Used when the output type is TypeInt64 (input was TypeInt32 or TypeInt64).
 type sumInt64Acc struct{ sum int64 }
 
-func (a *sumInt64Acc) Ingest(val any, null bool) {
-	if null {
-		return
-	}
-	switch v := val.(type) {
-	case int32:
-		a.sum += int64(v)
-	case int64:
-		a.sum += v
+func (a *sumInt64Acc) Ingest(v Value) {
+	switch v.Kind {
+	case KindInt32, KindInt64:
+		a.sum += v.I
 	}
 }
 
-func (a *sumInt64Acc) Result() (any, bool) { return a.sum, false }
+func (a *sumInt64Acc) Result() Value { return Value{Kind: KindInt64, I: a.sum} }
 
 // ─── sumFloat64Acc ───────────────────────────────────────────────────────────
 
 // sumFloat64Acc sums float64 values; null rows are skipped.
 type sumFloat64Acc struct{ sum float64 }
 
-func (a *sumFloat64Acc) Ingest(val any, null bool) {
-	if null {
-		return
-	}
-	if v, ok := val.(float64); ok {
-		a.sum += v
+func (a *sumFloat64Acc) Ingest(v Value) {
+	if v.Kind == KindFloat64 {
+		a.sum += v.F
 	}
 }
 
-func (a *sumFloat64Acc) Result() (any, bool) { return a.sum, false }
+func (a *sumFloat64Acc) Result() Value { return Value{Kind: KindFloat64, F: a.sum} }
 
 // ─── avgAcc ──────────────────────────────────────────────────────────────────
 
 // avgAcc computes the arithmetic mean as float64; null rows are skipped.
-// Returns null when no non-null values were ingested.
+// Returns KindNull when no non-null values were ingested.
 type avgAcc struct {
 	sum float64
 	n   int64
 }
 
-func (a *avgAcc) Ingest(val any, null bool) {
-	if null {
-		return
+func (a *avgAcc) Ingest(v Value) {
+	switch v.Kind {
+	case KindInt32, KindInt64:
+		a.sum += float64(v.I)
+		a.n++
+	case KindFloat64:
+		a.sum += v.F
+		a.n++
 	}
-	switch v := val.(type) {
-	case int32:
-		a.sum += float64(v)
-	case int64:
-		a.sum += float64(v)
-	case float64:
-		a.sum += v
-	}
-	a.n++
 }
 
-func (a *avgAcc) Result() (any, bool) {
+func (a *avgAcc) Result() Value {
 	if a.n == 0 {
-		return nil, true
+		return Value{Kind: KindNull}
 	}
-	return a.sum / float64(a.n), false
-}
-
-// ─── cmpVal ──────────────────────────────────────────────────────────────────
-
-// cmpVal compares two non-null ordered values of the same concrete type.
-// Returns -1, 0, or +1. Used by minAcc and maxAcc.
-func cmpVal(a, b any) int {
-	switch av := a.(type) {
-	case int32:
-		bv := b.(int32)
-		if av < bv {
-			return -1
-		} else if av > bv {
-			return 1
-		}
-	case int64:
-		bv := b.(int64)
-		if av < bv {
-			return -1
-		} else if av > bv {
-			return 1
-		}
-	case float64:
-		bv := b.(float64)
-		if av < bv {
-			return -1
-		} else if av > bv {
-			return 1
-		}
-	case time.Time:
-		bv := b.(time.Time)
-		if av.Before(bv) {
-			return -1
-		} else if av.After(bv) {
-			return 1
-		}
-	case time.Duration:
-		bv := b.(time.Duration)
-		if av < bv {
-			return -1
-		} else if av > bv {
-			return 1
-		}
-	}
-	return 0
+	return Value{Kind: KindFloat64, F: a.sum / float64(a.n)}
 }
 
 // ─── minAcc ──────────────────────────────────────────────────────────────────
 
 // minAcc tracks the minimum non-null value seen.
-// Returns null when no non-null values were ingested.
+// Returns KindNull when no non-null values were ingested.
 type minAcc struct {
-	val    any
+	val    Value
 	hasVal bool
 }
 
-func (a *minAcc) Ingest(val any, null bool) {
-	if null {
+func (a *minAcc) Ingest(v Value) {
+	if v.Kind == KindNull {
 		return
 	}
-	if !a.hasVal || cmpVal(val, a.val) < 0 {
-		a.val = val
+	if !a.hasVal || CmpValue(v, a.val) < 0 {
+		a.val = v
 		a.hasVal = true
 	}
 }
 
-func (a *minAcc) Result() (any, bool) {
+func (a *minAcc) Result() Value {
 	if !a.hasVal {
-		return nil, true
+		return Value{Kind: KindNull}
 	}
-	return a.val, false
+	return a.val
 }
 
 // ─── maxAcc ──────────────────────────────────────────────────────────────────
 
 // maxAcc tracks the maximum non-null value seen.
-// Returns null when no non-null values were ingested.
+// Returns KindNull when no non-null values were ingested.
 type maxAcc struct {
-	val    any
+	val    Value
 	hasVal bool
 }
 
-func (a *maxAcc) Ingest(val any, null bool) {
-	if null {
+func (a *maxAcc) Ingest(v Value) {
+	if v.Kind == KindNull {
 		return
 	}
-	if !a.hasVal || cmpVal(val, a.val) > 0 {
-		a.val = val
+	if !a.hasVal || CmpValue(v, a.val) > 0 {
+		a.val = v
 		a.hasVal = true
 	}
 }
 
-func (a *maxAcc) Result() (any, bool) {
+func (a *maxAcc) Result() Value {
 	if !a.hasVal {
-		return nil, true
+		return Value{Kind: KindNull}
 	}
-	return a.val, false
+	return a.val
 }
 
 // ─── dcountAcc ───────────────────────────────────────────────────────────────
 
-// dcountAcc counts distinct non-null values using their fmt.Sprintf("%v") key.
-// A single dcount field always has one concrete type so there is no collision risk.
+// dcountAcc counts distinct non-null values using an injective binary key
+// (via appendValueKey) to avoid type-collision false positives.
 type dcountAcc struct {
 	seen map[string]struct{}
 }
 
-func (a *dcountAcc) Ingest(val any, null bool) {
-	if null {
+func (a *dcountAcc) Ingest(v Value) {
+	if v.Kind == KindNull {
 		return
 	}
 	if a.seen == nil {
 		a.seen = make(map[string]struct{})
 	}
-	a.seen[fmt.Sprintf("%v", val)] = struct{}{}
+	a.seen[string(AppendValueKey(nil, v))] = struct{}{}
 }
 
-func (a *dcountAcc) Result() (any, bool) {
-	return int64(len(a.seen)), false
+func (a *dcountAcc) Result() Value {
+	return Value{Kind: KindInt64, I: int64(len(a.seen))}
 }

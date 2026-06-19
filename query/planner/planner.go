@@ -281,7 +281,7 @@ func (p *planner) buildJoin(n *logical.LogicalJoin) (physical.Operator, error) {
 	outSchema := make([]batch.ColumnMeta, len(outCols))
 	outKinds := make([]physical.VecKind, len(outCols))
 	for i, col := range outCols {
-		outSchema[i] = batch.ColumnMeta{Name: col.Name, Origin: col.Origin}
+		outSchema[i] = batch.ColumnMeta{Name: col.Name, Origin: col.Origin, Type: col.Type}
 		outKinds[i] = physical.VecKindFromColumnType(col.Type)
 	}
 

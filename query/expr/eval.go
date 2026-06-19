@@ -110,206 +110,209 @@ func columnIndex(schema []batch.ColumnMeta, ref ast.FieldRef) (int, error) {
 }
 
 // evalScalar evaluates an ast.ScalarExpr for one row.
-// Returns (value, isNull, error). The concrete value type is one of:
-// int32, int64, float64, string, bool, time.Time, time.Duration.
-func evalScalar(e ast.ScalarExpr, b *batch.Batch, row int) (any, bool, error) {
+// Returns a typed Value. Value{Kind: KindNull} represents a null result.
+func evalScalar(e ast.ScalarExpr, b *batch.Batch, row int) (Value, error) {
 	switch s := e.(type) {
 	case *ast.FieldRefExpr:
 		idx, err := columnIndex(b.Schema, s.Ref)
 		if err != nil {
-			return nil, false, err
+			return Value{}, err
 		}
 		col := b.Columns[idx]
 		if col.IsNull(row) {
-			return nil, true, nil
+			return Value{Kind: KindNull}, nil
 		}
 		switch v := col.(type) {
 		case *batch.Int32Vector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindInt32, I: int64(v.Values[row])}, nil
 		case *batch.Int64Vector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindInt64, I: v.Values[row]}, nil
 		case *batch.Float64Vector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindFloat64, F: v.Values[row]}, nil
 		case *batch.StringVector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindString, S: v.Values[row]}, nil
 		case *batch.BoolVector:
-			return v.Values[row], false, nil
+			i := int64(0)
+			if v.Values[row] {
+				i = 1
+			}
+			return Value{Kind: KindBool, I: i}, nil
 		case *batch.DatetimeVector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindDatetime, I: v.Values[row].UnixNano()}, nil
 		case *batch.TimespanVector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindTimespan, I: int64(v.Values[row])}, nil
 		case *batch.DynamicVector:
-			return v.Values[row], false, nil
+			return Value{Kind: KindDynamic, S: v.Values[row]}, nil
 		default:
-			return nil, false, fmt.Errorf("expr: unsupported column type %T", col)
+			return Value{}, fmt.Errorf("expr: unsupported column type %T", col)
 		}
 
 	case *ast.IntLit:
-		return s.Value, false, nil
+		return Value{Kind: KindInt64, I: s.Value}, nil
 	case *ast.FloatLit:
-		return s.Value, false, nil
+		return Value{Kind: KindFloat64, F: s.Value}, nil
 	case *ast.StringLit:
-		return s.Value, false, nil
+		return Value{Kind: KindString, S: s.Value}, nil
 	case *ast.BoolLit:
-		return s.Value, false, nil
+		i := int64(0)
+		if s.Value {
+			i = 1
+		}
+		return Value{Kind: KindBool, I: i}, nil
 	case *ast.DatetimeLit:
-		return s.Value, false, nil
+		return Value{Kind: KindDatetime, I: s.Value.UnixNano()}, nil
 	case *ast.AgoExpr:
-		return time.Now().Add(-s.Duration.Duration), false, nil
+		return Value{Kind: KindDatetime, I: time.Now().Add(-s.Duration.Duration).UnixNano()}, nil
 
 	case *ast.BinaryExpr:
-		lv, lNull, err := evalScalar(s.Left, b, row)
+		lv, err := evalScalar(s.Left, b, row)
 		if err != nil {
-			return nil, false, err
+			return Value{}, err
 		}
-		rv, rNull, err := evalScalar(s.Right, b, row)
+		rv, err := evalScalar(s.Right, b, row)
 		if err != nil {
-			return nil, false, err
+			return Value{}, err
 		}
-		if lNull || rNull {
-			return nil, true, nil
+		if lv.Kind == KindNull || rv.Kind == KindNull {
+			return Value{Kind: KindNull}, nil
 		}
-		result, err := applyBinaryOp(lv, s.Op, rv)
-		return result, false, err
+		return applyBinaryOp(lv, s.Op, rv)
 
 	case *ast.UnaryMinusExpr:
-		v, isNull, err := evalScalar(s.Expr, b, row)
+		v, err := evalScalar(s.Expr, b, row)
 		if err != nil {
-			return nil, false, err
+			return Value{}, err
 		}
-		if isNull {
-			return nil, true, nil
+		if v.Kind == KindNull {
+			return Value{Kind: KindNull}, nil
 		}
-		result, err := applyUnaryMinus(v)
-		return result, false, err
+		return applyUnaryMinus(v)
 
 	default:
-		return nil, false, fmt.Errorf("expr: unsupported ScalarExpr type %T", e)
+		return Value{}, fmt.Errorf("expr: unsupported ScalarExpr type %T", e)
 	}
 }
 
-// applyBinaryOp evaluates lv op rv at runtime.
-// int32 values are normalised to int64 before dispatch.
-func applyBinaryOp(lv any, op ast.BinaryOp, rv any) (any, error) {
-	if v, ok := lv.(int32); ok {
-		lv = int64(v)
+// applyBinaryOp evaluates lv op rv. Int32 is normalised to Int64 before dispatch.
+func applyBinaryOp(lv Value, op ast.BinaryOp, rv Value) (Value, error) {
+	// Normalise Int32 → Int64 for arithmetic
+	if lv.Kind == KindInt32 {
+		lv.Kind = KindInt64
 	}
-	if v, ok := rv.(int32); ok {
-		rv = int64(v)
+	if rv.Kind == KindInt32 {
+		rv.Kind = KindInt64
 	}
 
-	switch l := lv.(type) {
-	case int64:
-		switch r := rv.(type) {
-		case int64:
+	switch lv.Kind {
+	case KindInt64:
+		switch rv.Kind {
+		case KindInt64:
 			switch op {
 			case ast.BinAdd:
-				return l + r, nil
+				return Value{Kind: KindInt64, I: lv.I + rv.I}, nil
 			case ast.BinSub:
-				return l - r, nil
+				return Value{Kind: KindInt64, I: lv.I - rv.I}, nil
 			case ast.BinMul:
-				return l * r, nil
+				return Value{Kind: KindInt64, I: lv.I * rv.I}, nil
 			case ast.BinDiv:
-				if r == 0 {
-					return nil, fmt.Errorf("expr: integer division by zero")
+				if rv.I == 0 {
+					return Value{}, fmt.Errorf("expr: integer division by zero")
 				}
-				return l / r, nil
+				return Value{Kind: KindInt64, I: lv.I / rv.I}, nil
 			}
-		case float64:
-			return applyBinaryOp(float64(l), op, r)
+		case KindFloat64:
+			return applyBinaryOp(Value{Kind: KindFloat64, F: float64(lv.I)}, op, rv)
 		}
-	case float64:
-		switch r := rv.(type) {
-		case float64:
+	case KindFloat64:
+		switch rv.Kind {
+		case KindFloat64:
 			switch op {
 			case ast.BinAdd:
-				return l + r, nil
+				return Value{Kind: KindFloat64, F: lv.F + rv.F}, nil
 			case ast.BinSub:
-				return l - r, nil
+				return Value{Kind: KindFloat64, F: lv.F - rv.F}, nil
 			case ast.BinMul:
-				return l * r, nil
+				return Value{Kind: KindFloat64, F: lv.F * rv.F}, nil
 			case ast.BinDiv:
-				if r == 0 {
-					return nil, fmt.Errorf("expr: float division by zero")
+				if rv.F == 0 {
+					return Value{}, fmt.Errorf("expr: float division by zero")
 				}
-				return l / r, nil
+				return Value{Kind: KindFloat64, F: lv.F / rv.F}, nil
 			}
-		case int64:
-			return applyBinaryOp(l, op, float64(r))
+		case KindInt64:
+			return applyBinaryOp(lv, op, Value{Kind: KindFloat64, F: float64(rv.I)})
 		}
-	case time.Time:
-		switch r := rv.(type) {
-		case time.Time:
+	case KindDatetime:
+		switch rv.Kind {
+		case KindDatetime:
 			if op == ast.BinSub {
-				return l.Sub(r), nil
+				return Value{Kind: KindTimespan, I: lv.I - rv.I}, nil
 			}
-		case time.Duration:
+		case KindTimespan:
 			switch op {
 			case ast.BinAdd:
-				return l.Add(r), nil
+				return Value{Kind: KindDatetime, I: lv.I + rv.I}, nil
 			case ast.BinSub:
-				return l.Add(-r), nil
+				return Value{Kind: KindDatetime, I: lv.I - rv.I}, nil
 			}
 		}
-	case time.Duration:
-		switch r := rv.(type) {
-		case time.Duration:
+	case KindTimespan:
+		switch rv.Kind {
+		case KindTimespan:
 			switch op {
 			case ast.BinAdd:
-				return l + r, nil
+				return Value{Kind: KindTimespan, I: lv.I + rv.I}, nil
 			case ast.BinSub:
-				return l - r, nil
+				return Value{Kind: KindTimespan, I: lv.I - rv.I}, nil
 			}
-		case int64:
+		case KindInt64:
 			switch op {
 			case ast.BinMul:
-				return l * time.Duration(r), nil
+				return Value{Kind: KindTimespan, I: lv.I * rv.I}, nil
 			case ast.BinDiv:
-				if r == 0 {
-					return nil, fmt.Errorf("expr: division by zero")
+				if rv.I == 0 {
+					return Value{}, fmt.Errorf("expr: division by zero")
 				}
-				return l / time.Duration(r), nil
+				return Value{Kind: KindTimespan, I: lv.I / rv.I}, nil
 			}
-		case float64:
+		case KindFloat64:
 			switch op {
 			case ast.BinMul:
-				return time.Duration(float64(l) * r), nil
+				return Value{Kind: KindTimespan, I: int64(float64(lv.I) * rv.F)}, nil
 			case ast.BinDiv:
-				if r == 0 {
-					return nil, fmt.Errorf("expr: division by zero")
+				if rv.F == 0 {
+					return Value{}, fmt.Errorf("expr: division by zero")
 				}
-				return time.Duration(float64(l) / r), nil
+				return Value{Kind: KindTimespan, I: int64(float64(lv.I) / rv.F)}, nil
 			}
 		}
 	}
-	return nil, fmt.Errorf("expr: no binary rule for %T %v %T", lv, op, rv)
+	return Value{}, fmt.Errorf("expr: no binary rule for %v %v %v", lv.Kind, op, rv.Kind)
 }
 
-func applyUnaryMinus(v any) (any, error) {
-	switch n := v.(type) {
-	case int32:
-		return -n, nil
-	case int64:
-		return -n, nil
-	case float64:
-		return -n, nil
-	case time.Duration:
-		return -n, nil
+func applyUnaryMinus(v Value) (Value, error) {
+	switch v.Kind {
+	case KindInt32, KindInt64:
+		return Value{Kind: KindInt64, I: -v.I}, nil
+	case KindFloat64:
+		return Value{Kind: KindFloat64, F: -v.F}, nil
+	case KindTimespan:
+		return Value{Kind: KindTimespan, I: -v.I}, nil
 	}
-	return nil, fmt.Errorf("expr: unary minus not applicable to %T", v)
+	return Value{}, fmt.Errorf("expr: unary minus not applicable to %v", v.Kind)
 }
 
 func compileCompare(e *ast.CompareExpr) RowPredicate {
 	return func(b *batch.Batch, row int) (bool, error) {
-		lv, lNull, err := evalScalar(e.Left, b, row)
+		lv, err := evalScalar(e.Left, b, row)
 		if err != nil {
 			return false, err
 		}
-		rv, rNull, err := evalScalar(e.Right, b, row)
+		rv, err := evalScalar(e.Right, b, row)
 		if err != nil {
 			return false, err
 		}
-		if lNull || rNull {
+		if lv.Kind == KindNull || rv.Kind == KindNull {
 			return false, nil // null propagates to false
 		}
 		return compareValues(lv, e.Op, rv)
@@ -344,65 +347,58 @@ func compileIsNull(e *ast.IsNullExpr) RowPredicate {
 	}
 }
 
-// compareValues compares two scalar values with numeric type promotion.
-// Promotion rules: int32 → int64; int64 → float64 when the other side is float64.
-func compareValues(left any, op ast.CompareOp, right any) (bool, error) {
-	if v, ok := left.(int32); ok {
-		left = int64(v)
+// compareValues compares two Values with numeric type promotion.
+// Promotion rules: Int32 → Int64; Int64 → Float64 when the other side is Float64.
+func compareValues(left Value, op ast.CompareOp, right Value) (bool, error) {
+	// Normalise Int32 → Int64
+	if left.Kind == KindInt32 {
+		left.Kind = KindInt64
 	}
-	if v, ok := right.(int32); ok {
-		right = int64(v)
+	if right.Kind == KindInt32 {
+		right.Kind = KindInt64
 	}
-	switch left.(type) {
-	case int64:
-		if _, ok := right.(float64); ok {
-			left = float64(left.(int64))
-		}
-	case float64:
-		if r, ok := right.(int64); ok {
-			right = float64(r)
-		}
+	// Cross-type numeric promotion: int64 <-> float64
+	if left.Kind == KindInt64 && right.Kind == KindFloat64 {
+		left = Value{Kind: KindFloat64, F: float64(left.I)}
+	} else if left.Kind == KindFloat64 && right.Kind == KindInt64 {
+		right = Value{Kind: KindFloat64, F: float64(right.I)}
 	}
 
-	switch l := left.(type) {
-	case int64:
-		r, ok := right.(int64)
-		if !ok {
-			return false, fmt.Errorf("expr: type mismatch: int64 vs %T", right)
+	switch left.Kind {
+	case KindInt64:
+		if right.Kind != KindInt64 {
+			return false, fmt.Errorf("expr: type mismatch: int64 vs %v", right.Kind)
 		}
-		return cmpOrdered(l, op, r)
-	case float64:
-		r, ok := right.(float64)
-		if !ok {
-			return false, fmt.Errorf("expr: type mismatch: float64 vs %T", right)
+		return cmpOrdered(left.I, op, right.I)
+	case KindFloat64:
+		if right.Kind != KindFloat64 {
+			return false, fmt.Errorf("expr: type mismatch: float64 vs %v", right.Kind)
 		}
-		return cmpOrdered(l, op, r)
-	case string:
-		r, ok := right.(string)
-		if !ok {
-			return false, fmt.Errorf("expr: type mismatch: string vs %T", right)
+		return cmpOrdered(left.F, op, right.F)
+	case KindString, KindDynamic:
+		// Dynamic and String both store their value in .S and compare lexicographically.
+		// A string literal compared against a dynamic column is a common pattern.
+		if right.Kind != KindString && right.Kind != KindDynamic {
+			return false, fmt.Errorf("expr: type mismatch: %v vs %v", left.Kind, right.Kind)
 		}
-		return cmpString(l, op, r)
-	case bool:
-		r, ok := right.(bool)
-		if !ok {
-			return false, fmt.Errorf("expr: type mismatch: bool vs %T", right)
+		return cmpString(left.S, op, right.S)
+	case KindBool:
+		if right.Kind != KindBool {
+			return false, fmt.Errorf("expr: type mismatch: bool vs %v", right.Kind)
 		}
-		return cmpBool(l, op, r)
-	case time.Time:
-		r, ok := right.(time.Time)
-		if !ok {
-			return false, fmt.Errorf("expr: type mismatch: time.Time vs %T", right)
+		return cmpBool(left.I != 0, op, right.I != 0)
+	case KindDatetime:
+		if right.Kind != KindDatetime {
+			return false, fmt.Errorf("expr: type mismatch: datetime vs %v", right.Kind)
 		}
-		return cmpOrdered(l.UnixNano(), op, r.UnixNano())
-	case time.Duration:
-		r, ok := right.(time.Duration)
-		if !ok {
-			return false, fmt.Errorf("expr: type mismatch: time.Duration vs %T", right)
+		return cmpOrdered(left.I, op, right.I)
+	case KindTimespan:
+		if right.Kind != KindTimespan {
+			return false, fmt.Errorf("expr: type mismatch: timespan vs %v", right.Kind)
 		}
-		return cmpOrdered(int64(l), op, int64(r))
+		return cmpOrdered(left.I, op, right.I)
 	default:
-		return false, fmt.Errorf("expr: unsupported comparison type %T", left)
+		return false, fmt.Errorf("expr: unsupported comparison kind %v", left.Kind)
 	}
 }
 

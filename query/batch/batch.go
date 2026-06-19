@@ -2,12 +2,15 @@ package batch
 
 import "time"
 
-// ColumnMeta carries the name and origin of a column.
+// ColumnMeta carries the name, origin, and type of a column.
 // Origin is the source type name (e.g. "requests") for columns that come
 // directly from a CSV source, and empty for computed or aggregate columns.
+// Type is the logical data type; it defaults to TypeInt32 (zero value) when
+// not explicitly set by the producing operator.
 type ColumnMeta struct {
 	Name   string
 	Origin string
+	Type   ColumnType
 }
 
 // Batch is the unit of data flowing through the pipeline.

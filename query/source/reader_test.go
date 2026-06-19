@@ -128,14 +128,14 @@ func TestFileTableReader_ColumnMeta(t *testing.T) {
 	}
 
 	wantMeta := []batch.ColumnMeta{
-		{Name: "timestamp", Origin: "requests"},
-		{Name: "requestId", Origin: "requests"},
-		{Name: "userId", Origin: "requests"},
-		{Name: "requestCode", Origin: "requests"},
-		{Name: "statusCode", Origin: "requests"},
-		{Name: "durationMs", Origin: "requests"},
-		{Name: "region", Origin: "requests"},
-		{Name: "ttl", Origin: "requests"},
+		{Name: "timestamp", Origin: "requests", Type: TypeDatetime},
+		{Name: "requestId", Origin: "requests", Type: TypeString},
+		{Name: "userId", Origin: "requests", Type: TypeString},
+		{Name: "requestCode", Origin: "requests", Type: TypeString},
+		{Name: "statusCode", Origin: "requests", Type: TypeInt32},
+		{Name: "durationMs", Origin: "requests", Type: TypeFloat64},
+		{Name: "region", Origin: "requests", Type: TypeString},
+		{Name: "ttl", Origin: "requests", Type: TypeTimespan},
 	}
 	if len(b.Schema) != len(wantMeta) {
 		t.Fatalf("schema length: got %d, want %d", len(b.Schema), len(wantMeta))
