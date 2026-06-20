@@ -284,7 +284,7 @@ Baseline: Windows/arm64, Go 1.24, `go test -bench=. -benchmem -count=1 ./query/p
 
 ---
 
-## Implementation Order
+## Implementation Order (completed)
 
 1. **Define `Value`** — add `query/expr/value.go` with `Value`, `ValueKind`, and `appendValueKey`. No dependencies on other changes; compiles standalone.
 2. **Move `ColumnType` to `query/batch`** — move constants and type from `query/source/schema.go`; update all import sites. Add `Type batch.ColumnType` to `ColumnMeta`.
