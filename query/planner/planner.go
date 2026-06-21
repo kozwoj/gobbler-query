@@ -71,7 +71,7 @@ func (p *planner) buildSource(n *logical.LogicalSource) (physical.Operator, erro
 	if !ok {
 		return nil, fmt.Errorf("planner: table %q not in catalog", n.TypeName)
 	}
-	reader, err := source.NewTableReader(entry, n.Start, n.End, p.batchSize)
+	reader, err := source.NewTableReader(entry, n.Start, n.End, p.batchSize, nil)
 	if err != nil {
 		return nil, fmt.Errorf("planner: open %q: %w", n.TypeName, err)
 	}

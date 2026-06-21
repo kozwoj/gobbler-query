@@ -38,7 +38,7 @@ func nullIntBatch(col string, vals []int32, nullRow int) *batch.Batch {
 
 // checkRows evaluates pred against every row in b and checks the result
 // against want. want must have exactly b.Length entries.
-func checkRows(t *testing.T, label string, pred RowPredicate, b *batch.Batch, want []bool) {
+func checkRows(t *testing.T, label string, pred batch.RowPredicate, b *batch.Batch, want []bool) {
 	t.Helper()
 	for row, w := range want {
 		got, err := pred(b, row)

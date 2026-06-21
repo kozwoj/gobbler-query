@@ -34,7 +34,7 @@ func newBlobReader(t *testing.T, container, typeName string, start, end time.Tim
 		t.Fatalf("credential: %v", err)
 	}
 	containerURL := "https://" + account + ".blob.core.windows.net/" + container
-	r, err := NewBlobTableReader(containerURL, typeName, cred, start, end, testBatchSize)
+	r, err := NewBlobTableReader(containerURL, typeName, cred, start, end, testBatchSize, nil)
 	if err != nil {
 		t.Fatalf("NewBlobTableReader: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestBlobTableReader_MatchesFileReader(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fr, err := NewFileTableReader(requestsDir, "requests", tc.start, tc.end, testBatchSize)
+			fr, err := NewFileTableReader(requestsDir, "requests", tc.start, tc.end, testBatchSize, nil)
 			if err != nil {
 				t.Fatalf("NewFileTableReader: %v", err)
 			}

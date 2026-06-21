@@ -9,16 +9,11 @@ import (
 	"github.com/kozwoj/gobbler-query/query/batch"
 )
 
-// RowPredicate evaluates a single row from a batch.
-// Returns true if the row passes the predicate, false if it should be excluded.
-// A non-nil error indicates an unrecoverable evaluation failure (type mismatch,
-// missing column, etc.).
-type RowPredicate func(b *batch.Batch, row int) (bool, error)
-
-// Compile compiles an ast.BoolExpr into a RowPredicate.
+// RowPredicate is defined in the batch package.
+// Compile compiles an ast.BoolExpr into a batch.RowPredicate.
 // The returned predicate captures only the expression tree; column resolution
 // happens at evaluation time against the batch schema.
-func Compile(e ast.BoolExpr) (RowPredicate, error) {
+func Compile(e ast.BoolExpr) (batch.RowPredicate, error) {
 	switch n := e.(type) {
 	case *ast.AndExpr:
 		left, err := Compile(n.Left)
@@ -302,7 +297,7 @@ func applyUnaryMinus(v Value) (Value, error) {
 	return Value{}, fmt.Errorf("expr: unary minus not applicable to %v", v.Kind)
 }
 
-func compileCompare(e *ast.CompareExpr) RowPredicate {
+func compileCompare(e *ast.CompareExpr) batch.RowPredicate {
 	return func(b *batch.Batch, row int) (bool, error) {
 		lv, err := evalScalar(e.Left, b, row)
 		if err != nil {
@@ -319,7 +314,7 @@ func compileCompare(e *ast.CompareExpr) RowPredicate {
 	}
 }
 
-func compileIsNull(e *ast.IsNullExpr) RowPredicate {
+func compileIsNull(e *ast.IsNullExpr) batch.RowPredicate {
 	return func(b *batch.Batch, row int) (bool, error) {
 		idx, err := columnIndex(b.Schema, e.Field)
 		if err != nil {

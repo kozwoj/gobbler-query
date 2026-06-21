@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/kozwoj/gobbler-query/query/batch"
-	"github.com/kozwoj/gobbler-query/query/expr"
 )
 
 // FilterOp evaluates Pred for every row of each input batch and compacts
@@ -14,7 +13,7 @@ import (
 // rows or the input is exhausted.
 type FilterOp struct {
 	Input Operator
-	Pred  expr.RowPredicate
+	Pred  batch.RowPredicate
 }
 
 func (op *FilterOp) Next() (*batch.Batch, error) {

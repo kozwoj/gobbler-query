@@ -21,6 +21,10 @@ type Batch struct {
 	Columns []ColumnVector
 }
 
+// RowPredicate evaluates a single row from a batch.
+// Returns true if the row passes the predicate, false if it should be excluded.
+type RowPredicate func(b *Batch, row int) (bool, error)
+
 // ColumnVector is implemented by each typed vector.
 // Expression evaluators type-assert to the concrete type; Len and IsNull
 // allow generic null-checking without a type assertion.

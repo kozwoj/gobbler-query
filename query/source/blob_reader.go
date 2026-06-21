@@ -37,6 +37,7 @@ type BlobTableReader struct {
 	colBuilders     []columnBuilder
 	pendingRow      []string
 	done            bool
+	opts            *ReaderOptions // optional filter/projection pushdown; nil = no pushdown
 }
 
 // NewBlobTableReader constructs a BlobTableReader.
@@ -54,6 +55,7 @@ func NewBlobTableReader(
 	cred *azblob.SharedKeyCredential,
 	start, end time.Time,
 	batchSize int,
+	opts *ReaderOptions,
 ) (*BlobTableReader, error) {
 	cc, err := container.NewClientWithSharedKeyCredential(containerURL, cred, nil)
 	if err != nil {
@@ -106,6 +108,7 @@ func NewBlobTableReader(
 		start:           start,
 		end:             end,
 		colBuilders:     newColumnBuilders(schema, batchSize),
+		opts:            opts,
 	}
 
 	if len(selected) == 0 {

@@ -17,16 +17,28 @@ type TableReader interface {
 	Close() error
 }
 
+// ReaderOptions carries optional predicate and column-projection hints that
+// the reader applies inside GetNextBatch. Both fields are nil by default,
+// which preserves the existing full-width, unfiltered behaviour.
+type ReaderOptions struct {
+	// Pred is evaluated on each candidate batch. Only passing rows are kept.
+	// nil means accept all rows.
+	Pred batch.RowPredicate
+	// WantCols is the sorted list of column indices (into the source schema)
+	// that must appear in the output batch. nil means all columns.
+	WantCols []int
+}
+
 // NewTableReader constructs the appropriate TableReader based on entry.Mode.
-// entry.TypeName must be set.
-func NewTableReader(entry *catalog.TableEntry, start, end time.Time, batchSize int) (TableReader, error) {
+// entry.TypeName must be set. opts may be nil.
+func NewTableReader(entry *catalog.TableEntry, start, end time.Time, batchSize int, opts *ReaderOptions) (TableReader, error) {
 	switch entry.Mode {
 	case catalog.StorageModeFile:
 		typeDir, err := entry.Resolve()
 		if err != nil {
 			return nil, err
 		}
-		return NewFileTableReader(typeDir, entry.TypeName, start, end, batchSize)
+		return NewFileTableReader(typeDir, entry.TypeName, start, end, batchSize, opts)
 	case catalog.StorageModeBlob:
 		cred, err := azblob.NewSharedKeyCredential(entry.AccountName, entry.AccountKey)
 		if err != nil {
@@ -36,9 +48,8 @@ func NewTableReader(entry *catalog.TableEntry, start, end time.Time, batchSize i
 		if err != nil {
 			return nil, err
 		}
-		return NewBlobTableReader(containerURL, entry.TypeName, cred, start, end, batchSize)
+		return NewBlobTableReader(containerURL, entry.TypeName, cred, start, end, batchSize, opts)
 	default:
 		return nil, fmt.Errorf("NewTableReader: unknown storage mode %d", entry.Mode)
 	}
 }
-
