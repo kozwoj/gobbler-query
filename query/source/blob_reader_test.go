@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+
+	"github.com/kozwoj/gobbler-query/query/batch"
 )
 
 // blobIntegrationCreds returns (accountName, accountKey) from environment
@@ -143,5 +145,71 @@ func TestBlobTableReader_EmptyWindow(t *testing.T) {
 	b, err := r.GetNextBatch()
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF, got batch=%v err=%v", b, err)
+	}
+}
+
+func newBlobReaderWithOpts(t *testing.T, container, typeName string, start, end time.Time, opts *ReaderOptions) *BlobTableReader {
+	t.Helper()
+	account, key := blobIntegrationCreds(t)
+	cred, err := azblob.NewSharedKeyCredential(account, key)
+	if err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+	containerURL := "https://" + account + ".blob.core.windows.net/" + container
+	r, err := NewBlobTableReader(containerURL, typeName, cred, start, end, testBatchSize, opts)
+	if err != nil {
+		t.Fatalf("NewBlobTableReader: %v", err)
+	}
+	return r
+}
+
+// TestBlobTableReader_Pred_AllPass mirrors TestFileTableReader_Pred_AllPass.
+func TestBlobTableReader_Pred_AllPass(t *testing.T) {
+	opts := &ReaderOptions{
+		Pred: batch.RowPredicate(func(_ *batch.Batch, _ int) (bool, error) { return true, nil }),
+	}
+	r := newBlobReaderWithOpts(t, "requests", "requests", time.Time{}, time.Time{}, opts)
+	defer r.Close()
+
+	if got := countAllRows(t, r); got != 7000 {
+		t.Errorf("total rows: got %d, want 7000", got)
+	}
+}
+
+// TestBlobTableReader_Pred_WithWantCols mirrors TestFileTableReader_Pred_WithWantCols.
+func TestBlobTableReader_Pred_WithWantCols(t *testing.T) {
+	pred := batch.RowPredicate(func(b *batch.Batch, row int) (bool, error) {
+		sc := b.Columns[4].(*batch.Int32Vector)
+		if sc.IsNull(row) {
+			return false, nil
+		}
+		return sc.Values[row] >= 400, nil
+	})
+	opts := &ReaderOptions{Pred: pred, WantCols: []int{1, 4}}
+	r := newBlobReaderWithOpts(t, "requests", "requests", time.Time{}, time.Time{}, opts)
+	defer r.Close()
+
+	total := 0
+	for {
+		b, err := r.GetNextBatch()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("GetNextBatch: %v", err)
+		}
+		if len(b.Schema) != 2 {
+			t.Fatalf("schema length: got %d, want 2", len(b.Schema))
+		}
+		sc := b.Columns[1].(*batch.Int32Vector)
+		for i := 0; i < b.Length; i++ {
+			if !sc.IsNull(i) && sc.Values[i] < 400 {
+				t.Errorf("row %d: statusCode %d < 400 passed predicate", total+i, sc.Values[i])
+			}
+		}
+		total += b.Length
+	}
+	if total == 0 {
+		t.Error("expected at least one passing row")
 	}
 }

@@ -43,6 +43,8 @@ The predicate closures reference column indices into the full schema, so the can
 
 This eliminates `FilterOp`, the separate `compact()` copy, and reduces the memory traffic of the compact step to `len(wantCols)` columns instead of all N.
 
+For the `Where → Project → Source` pattern the predicate is compiled against the projected schema rather than the source schema — its column indices reference the projected column positions. `ReaderOptions` gains a `PredCols []int` field to handle this. When set, `GetNextBatch` evaluates `Pred` against `projectBatch(candidate, PredCols)` — a thin wrapper that shares column pointers with no data copy — instead of the full candidate. For a pure-column-select project `PredCols` equals `WantCols`.
+
 ## Planned logical pattern matching
 
 The planner detects the following patterns in the logical tree and folds them into a single source reader call instead of building separate operators:
@@ -53,6 +55,7 @@ The planner detects the following patterns in the logical tree and folds them in
 | `Where → Source` | `pred`; `wantCols` = nil (all columns kept) | `FilterOp` |
 | `Project → Source` | `wantCols` from project items; `pred` = nil | `ProjectOp` if pure column-select |
 | `Project → Where → Source` | `pred` from Where; `wantCols` from Project items | `FilterOp`; `ProjectOp` if pure column-select |
+| `Where → Project → Source` | `pred` (compiled against projected schema); `wantCols` from Project; `predCols = wantCols` | `FilterOp`; `ProjectOp` if pure column-select |
 
 "Pure column-select" means every project item is a bare `FieldRefExpr` with no alias or computed expression. In that case the output batch schema matches the project output and `ProjectOp` can be dropped entirely. Otherwise `ProjectOp` is kept but operates on the already-narrow batch.
 
@@ -86,17 +89,33 @@ Replace `os.Open` + `csv.Reader` with `os.ReadFile` + custom scanner. Add `Appen
 Replace the streaming `csv.Reader` path with `DownloadBuffer` + the same scanner from Step 4. Thread `ReaderOptions` through.  
 *Test*: existing blob integration tests pass; new unit test with `Pred` and `WantCols` against an in-memory fake blob.
 
-**Step 6 — Planner: `Where → Source` pattern** (`planner/`)  
-In `buildWhere`: if `n.Input` is `LogicalSource`, compile the predicate into `ReaderOptions.Pred`, build the source reader directly, and return a `SourceOp` — no `FilterOp`.  
+**Step 6 — Planner: pushdown analysis** (`planner/`)  
+Add `analyzePushdown(n logical.Node) pushdownPlan` — a pure pattern-matching function with no side effects. It inspects the top of the logical subtree rooted at `n` and classifies it into one of:
+- `pushdownNone` — no recognised pattern
+- `pushdownPred` — `LogicalWhere → LogicalSource`
+- `pushdownCols` — pure-column-select `LogicalProject → LogicalSource`
+- `pushdownPredThenCols` — pure-column-select `LogicalProject → LogicalWhere → LogicalSource`
+- `pushdownColsThenPred` — `LogicalWhere` → pure-column-select `LogicalProject → LogicalSource`
+
+The returned `pushdownPlan` struct carries the matched AST nodes (not compiled values). Steps 7–10 call `analyzePushdown` and dispatch on the result.  
+*Test*: unit tests directly on `analyzePushdown` covering all five cases, including aliased/computed project items (must return `pushdownNone` or `pushdownPred` only) and subtrees with no `LogicalSource`.
+
+**Step 7 — Planner: `Where → Source` pattern** (`planner/`)  
+Using the `pushdownPred` result from `analyzePushdown`: compile the predicate into `ReaderOptions.Pred`, build the source reader directly, return a `SourceOp` — no `FilterOp`.  
 *Test*: `api.Execute` e2e test on testdata with a `where` clause; assert correct filtered row count and values.
 
-**Step 7 — Planner: `Project → Source` pattern** (`planner/`)  
-In `buildProject`: if `n.Input` is `LogicalSource`, compute `WantCols` from the project items and pass to the reader. For pure column-select projects eliminate `ProjectOp`; for computed/renamed columns keep `ProjectOp` but feed it the narrow batch.  
+**Step 8 — Planner: `Project → Source` pattern** (`planner/`)  
+Using the `pushdownCols` result: compute `WantCols` from the project items and pass to the reader. For pure column-select projects eliminate `ProjectOp`; for computed/renamed columns keep `ProjectOp` but feed it the narrow batch.  
 *Test*: e2e test with `project` on a source; assert narrow output schema and correct values.
 
-**Step 8 — Planner: `Project → Where → Source` pattern** (`planner/`)  
-In `buildProject`: if `n.Input` is `LogicalWhere` whose input is `LogicalSource`, fold both `pred` and `wantCols` into the reader and suppress both `FilterOp` and `ProjectOp` (or keep `ProjectOp` for computed columns).  
+**Step 9 — Planner: `Project → Where → Source` pattern** (`planner/`)  
+Using the `pushdownPredThenCols` result: fold both `pred` and `wantCols` into the reader; suppress `FilterOp` and `ProjectOp` (or keep `ProjectOp` for computed columns).  
 *Test*: e2e test for `source | where ... | project ...`; assert filtered narrow output. Cross-check result against the unoptimized path.
+
+**Step 10 — Planner + source: `Where → Project → Source` pattern** (`planner/`, `source/`)  
+Add `PredCols []int` to `ReaderOptions`. In `GetNextBatch`, when `PredCols != nil`, evaluate `Pred` against `projectBatch(candidate, PredCols)` instead of the full candidate batch (shared column pointers, no data copy).  
+Using the `pushdownColsThenPred` result: compute `wantCols` from the project items, set `predCols = wantCols`, compile the pred (which references projected-schema column indices), build the source reader with all three options set.  
+*Test*: e2e test for `source | project ... | where ...` (pure column-select project); assert filtered narrow output matches the unoptimized path.
 
 ---
 
@@ -104,6 +123,6 @@ In `buildProject`: if `n.Input` is `LogicalWhere` whose input is `LogicalSource`
 
 | Package | Change |
 |---|---|
-| `query/source/` | `csvScanner` byte-slice field scanner; `fileReader` switches to `os.ReadFile`; `blobReader` switches to `DownloadBuffer`; `ReaderOptions{Pred, WantCols}` threaded through `NewTableReader`; `GetNextBatch` does combined filter+compact internally when either option is set |
+| `query/source/` | `csvScanner` byte-slice field scanner; `fileReader` switches to `os.ReadFile`; `blobReader` switches to `DownloadBuffer`; `ReaderOptions{Pred, WantCols, PredCols}` threaded through `NewTableReader`; `GetNextBatch` does combined filter+compact internally when any option is set; when `PredCols != nil`, `Pred` is evaluated against a projected view of the candidate batch |
 | `query/source/builders.go` | `AppendBytes(cell []byte)` variant on each `columnBuilder` to avoid `string(cell)` conversion in the hot path |
-| `query/planner/planner.go` | `buildWhere` and `buildProject` look ahead at the child node; when child is `LogicalSource` (through at most one `LogicalWhere`), fold pred and wantCols into the reader and suppress the corresponding operators |
+| `query/planner/planner.go` | `analyzePushdown` classifies the source-adjacent subtree into one of five patterns; `build*` methods dispatch on the result to fold `pred`, `wantCols`, and `predCols` into the reader and suppress the corresponding operators |

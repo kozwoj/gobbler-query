@@ -2,7 +2,6 @@ package source
 
 import (
 	"context"
-	"encoding/csv"
 	"fmt"
 	"io"
 	"strings"
@@ -20,22 +19,25 @@ import (
 // ascending entry-timestamp order, and batches cross blob boundaries
 // transparently.
 //
+// Each blob is downloaded in full so that all subsequent row-scanning is
+// in-memory with no further I/O, mirroring the os.ReadFile approach used by
+// FileTableReader.
+//
 // The container must contain:
 //   - exactly one schema blob named "<typeName>.json"
 //   - zero or more data blobs named "<timestamp>_<typeName>.csv"
 type BlobTableReader struct {
 	containerClient *container.Client
-	blobs           []string    // selected blob names in ascending timestamp order
-	blobIdx         int         // index of the currently open blob in blobs
-	blobReader      io.Closer   // active download body; nil between blobs
-	csv             *csv.Reader // wraps blobReader
+	blobs           []string // selected blob names in ascending timestamp order
+	blobIdx         int      // index of the currently loaded blob in blobs
+	data            []byte   // contents of the current blob, loaded in full
+	pos             int      // current scan position within data
 	schema          *Schema
 	typeName        string
 	batchSize       int
 	start           time.Time
 	end             time.Time
 	colBuilders     []columnBuilder
-	pendingRow      []string
 	done            bool
 	opts            *ReaderOptions // optional filter/projection pushdown; nil = no pushdown
 }
@@ -122,8 +124,8 @@ func NewBlobTableReader(
 	return r, nil
 }
 
-// openCurrentBlob downloads r.blobs[r.blobIdx] and reads its first row for
-// field-count validation. Empty blobs are skipped automatically.
+// openCurrentBlob downloads r.blobs[r.blobIdx] in full into r.data and
+// validates the first row's field count. Empty blobs are skipped automatically.
 func (r *BlobTableReader) openCurrentBlob() error {
 	blobName := r.blobs[r.blobIdx]
 	ctx := context.Background()
@@ -131,38 +133,27 @@ func (r *BlobTableReader) openCurrentBlob() error {
 	if err != nil {
 		return fmt.Errorf("%s: download: %w", blobName, err)
 	}
-
-	csvr := csv.NewReader(dlResp.Body)
-	csvr.FieldsPerRecord = -1
-	rec, err := csvr.Read()
-	if err == io.EOF {
-		// Empty blob — skip it.
-		dlResp.Body.Close()
+	data, err := io.ReadAll(dlResp.Body)
+	dlResp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("%s: read: %w", blobName, err)
+	}
+	if len(data) == 0 {
 		return r.advanceBlob()
 	}
-	if err != nil {
-		dlResp.Body.Close()
+	if err := validateFirstRowBytes(data, len(r.schema.Columns)); err != nil {
 		return fmt.Errorf("%s: %w", blobName, err)
 	}
-	if err := validateFieldCount(r.schema, rec); err != nil {
-		dlResp.Body.Close()
-		return fmt.Errorf("%s: %w", blobName, err)
-	}
-
-	r.blobReader = dlResp.Body
-	r.csv = csvr
-	r.pendingRow = rec
+	r.data = data
+	r.pos = 0
 	return nil
 }
 
-// advanceBlob closes the current blob stream and opens the next one.
+// advanceBlob releases the current blob buffer and loads the next blob.
 // Sets r.done = true when all blobs have been read.
 func (r *BlobTableReader) advanceBlob() error {
-	if r.blobReader != nil {
-		r.blobReader.Close()
-		r.blobReader = nil
-		r.csv = nil
-	}
+	r.data = nil
+	r.pos = 0
 	r.blobIdx++
 	if r.blobIdx >= len(r.blobs) {
 		r.done = true
@@ -171,83 +162,91 @@ func (r *BlobTableReader) advanceBlob() error {
 	return r.openCurrentBlob()
 }
 
-// nextRow returns the next CSV record, draining pendingRow first.
-func (r *BlobTableReader) nextRow() ([]string, error) {
-	if r.pendingRow != nil {
-		row := r.pendingRow
-		r.pendingRow = nil
-		return row, nil
-	}
-	return r.csv.Read()
-}
-
 // GetNextBatch returns the next dense batch of up to batchSize rows.
 // Returns (nil, io.EOF) when the reader is exhausted.
+// When opts.Pred is set, batches where all rows are rejected are consumed
+// internally and the next candidate batch is tried, matching FilterOp behaviour.
 func (r *BlobTableReader) GetNextBatch() (*batch.Batch, error) {
-	if r.done {
-		return nil, io.EOF
-	}
-
-	rows := 0
-	for rows < r.batchSize {
-		rec, err := r.nextRow()
-		if err == io.EOF {
-			if advErr := r.advanceBlob(); advErr != nil {
-				return nil, advErr
-			}
-			if r.done {
-				break
-			}
-			continue
-		}
-		if err != nil {
-			return nil, err
+	for {
+		if r.done {
+			return nil, io.EOF
 		}
 
-		// Leading skip: first selected blob only, skip rows before start.
-		if !r.start.IsZero() && r.blobIdx == 0 {
-			ts, _ := time.Parse(datetimeFormat, rec[0])
-			if ts.Before(r.start) {
+		rows := 0
+		for rows < r.batchSize {
+			rec := scanRow(r.data, &r.pos, len(r.schema.Columns))
+			if rec == nil {
+				if advErr := r.advanceBlob(); advErr != nil {
+					return nil, advErr
+				}
+				if r.done {
+					break
+				}
 				continue
 			}
-		}
 
-		// Trailing stop: last selected blob only, stop when past end.
-		if !r.end.IsZero() && r.blobIdx == len(r.blobs)-1 {
-			ts, _ := time.Parse(datetimeFormat, rec[0])
-			if ts.After(r.end) {
-				r.done = true
-				break
+			// Leading skip: first selected blob only, skip rows before start.
+			if !r.start.IsZero() && r.blobIdx == 0 {
+				ts, _ := time.Parse(datetimeFormat, string(rec[0]))
+				if ts.Before(r.start) {
+					continue
+				}
 			}
+
+			// Trailing stop: last selected blob only, stop when past end.
+			if !r.end.IsZero() && r.blobIdx == len(r.blobs)-1 {
+				ts, _ := time.Parse(datetimeFormat, string(rec[0]))
+				if ts.After(r.end) {
+					r.done = true
+					break
+				}
+			}
+
+			for i, b := range r.colBuilders {
+				b.AppendBytes(rec[i])
+			}
+			rows++
 		}
 
-		for i, b := range r.colBuilders {
-			b.Append(rec[i])
+		if rows == 0 {
+			return nil, io.EOF
 		}
-		rows++
-	}
 
-	if rows == 0 {
-		return nil, io.EOF
-	}
+		cols := make([]batch.ColumnVector, len(r.schema.Columns))
+		meta := make([]batch.ColumnMeta, len(r.schema.Columns))
+		for i, cb := range r.colBuilders {
+			cols[i] = cb.FinalizeColumn(rows)
+			meta[i] = batch.ColumnMeta{Name: r.schema.Columns[i].Name, Origin: r.typeName, Type: r.schema.Columns[i].Type}
+			cb.Reset()
+		}
+		candidate := &batch.Batch{Length: rows, Schema: meta, Columns: cols}
 
-	cols := make([]batch.ColumnVector, len(r.schema.Columns))
-	meta := make([]batch.ColumnMeta, len(r.schema.Columns))
-	for i, cb := range r.colBuilders {
-		cols[i] = cb.FinalizeColumn(rows)
-		meta[i] = batch.ColumnMeta{Name: r.schema.Columns[i].Name, Origin: r.typeName, Type: r.schema.Columns[i].Type}
-		cb.Reset()
+		if r.opts != nil && r.opts.Pred != nil {
+			passing := make([]int, 0, rows)
+			for row := 0; row < rows; row++ {
+				ok, err := r.opts.Pred(candidate, row)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					passing = append(passing, row)
+				}
+			}
+			if len(passing) == 0 {
+				continue // all rows rejected; read next candidate batch
+			}
+			return compactWithCols(candidate, passing, r.opts.WantCols)
+		}
+
+		if r.opts != nil && r.opts.WantCols != nil {
+			return projectBatch(candidate, r.opts.WantCols), nil
+		}
+		return candidate, nil
 	}
-	return &batch.Batch{Length: rows, Schema: meta, Columns: cols}, nil
 }
 
-// Close releases the active blob download stream.
+// Close releases the in-memory blob buffer.
 func (r *BlobTableReader) Close() error {
-	if r.blobReader != nil {
-		err := r.blobReader.Close()
-		r.blobReader = nil
-		r.csv = nil
-		return err
-	}
+	r.data = nil
 	return nil
 }

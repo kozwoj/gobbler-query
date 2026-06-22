@@ -14,6 +14,10 @@ const datetimeFormat = "2006-01-02 15:04:05.000"
 // across every batch — no allocations occur inside the inner read loop.
 type columnBuilder interface {
 	Append(raw string)
+	// AppendBytes is the []byte variant used by the bulk-read path. cell is a
+	// slice into the file buffer; for non-string types the compiler can elide
+	// the string(cell) conversion because it does not escape the call.
+	AppendBytes(cell []byte)
 	FinalizeColumn(n int) batch.ColumnVector
 	Reset()
 }
@@ -89,6 +93,17 @@ func (b *int32Builder) Append(raw string) {
 	b.cur++
 }
 
+func (b *int32Builder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else if v, err := strconv.ParseInt(string(cell), 10, 32); err != nil {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = int32(v)
+	}
+	b.cur++
+}
+
 func (b *int32Builder) FinalizeColumn(n int) batch.ColumnVector {
 	vals := make([]int32, n)
 	copy(vals, b.values[:n])
@@ -116,6 +131,17 @@ func (b *float64Builder) Append(raw string) {
 	if raw == "" {
 		setNull(b.nulls, b.cur)
 	} else if v, err := strconv.ParseFloat(raw, 64); err != nil {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = v
+	}
+	b.cur++
+}
+
+func (b *float64Builder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else if v, err := strconv.ParseFloat(string(cell), 64); err != nil {
 		setNull(b.nulls, b.cur)
 	} else {
 		b.values[b.cur] = v
@@ -155,6 +181,15 @@ func (b *stringBuilder) Append(raw string) {
 	b.cur++
 }
 
+func (b *stringBuilder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = string(cell)
+	}
+	b.cur++
+}
+
 func (b *stringBuilder) FinalizeColumn(n int) batch.ColumnVector {
 	vals := make([]string, n)
 	copy(vals, b.values[:n])
@@ -182,6 +217,17 @@ func (b *boolBuilder) Append(raw string) {
 	if raw == "" {
 		setNull(b.nulls, b.cur)
 	} else if v, err := strconv.ParseBool(raw); err != nil {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = v
+	}
+	b.cur++
+}
+
+func (b *boolBuilder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else if v, err := strconv.ParseBool(string(cell)); err != nil {
 		setNull(b.nulls, b.cur)
 	} else {
 		b.values[b.cur] = v
@@ -223,6 +269,17 @@ func (b *datetimeBuilder) Append(raw string) {
 	b.cur++
 }
 
+func (b *datetimeBuilder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else if v, err := time.Parse(datetimeFormat, string(cell)); err != nil {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = v
+	}
+	b.cur++
+}
+
 func (b *datetimeBuilder) FinalizeColumn(n int) batch.ColumnVector {
 	vals := make([]time.Time, n)
 	copy(vals, b.values[:n])
@@ -250,6 +307,17 @@ func (b *timespanBuilder) Append(raw string) {
 	if raw == "" {
 		setNull(b.nulls, b.cur)
 	} else if v, err := time.ParseDuration(raw); err != nil {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = v
+	}
+	b.cur++
+}
+
+func (b *timespanBuilder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else if v, err := time.ParseDuration(string(cell)); err != nil {
 		setNull(b.nulls, b.cur)
 	} else {
 		b.values[b.cur] = v
@@ -288,6 +356,15 @@ func (b *dynamicBuilder) Append(raw string) {
 		setNull(b.nulls, b.cur)
 	} else {
 		b.values[b.cur] = raw
+	}
+	b.cur++
+}
+
+func (b *dynamicBuilder) AppendBytes(cell []byte) {
+	if len(cell) == 0 {
+		setNull(b.nulls, b.cur)
+	} else {
+		b.values[b.cur] = string(cell)
 	}
 	b.cur++
 }

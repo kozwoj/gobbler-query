@@ -1,7 +1,6 @@
 package source
 
 import (
-	"encoding/csv"
 	"fmt"
 	"io"
 	"os"
@@ -15,18 +14,20 @@ import (
 // FileTableReader reads CSV files from a directory as a single ordered row
 // stream. Files are selected by time-window pruning and read in ascending
 // entry-timestamp order. Batches cross file boundaries transparently.
+//
+// Each file is loaded in full with os.ReadFile so that all subsequent
+// row-scanning is in-memory with no further I/O.
 type FileTableReader struct {
-	files       []string    // ordered selected file paths (absolute)
-	fileIdx     int         // index of the currently open file in files
-	file        *os.File    // currently open file handle
-	csv         *csv.Reader // wraps file
-	schema      *Schema     // parsed once from {typeName}.json
-	typeName    string      // stored as Origin in every ColumnMeta
+	files       []string // ordered selected file paths (absolute)
+	fileIdx     int      // index of the currently loaded file in files
+	data        []byte   // contents of the current file, loaded in full
+	pos         int      // current scan position within data
+	schema      *Schema  // parsed once from {typeName}.json
+	typeName    string   // stored as Origin in every ColumnMeta
 	batchSize   int
 	start       time.Time       // zero = open lower bound
 	end         time.Time       // zero = open upper bound
 	colBuilders []columnBuilder // scratch buffers, pre-allocated and reused
-	pendingRow  []string        // first row of the current file, consumed before csv.Read
 	done        bool
 	opts        *ReaderOptions // optional filter/projection pushdown; nil = no pushdown
 }
@@ -89,59 +90,36 @@ func NewFileTableReader(typeDir, typeName string, start, end time.Time, batchSiz
 	return r, nil
 }
 
-// openCurrentFile opens r.files[r.fileIdx], reads the first row for field-count
-// validation, and stores it in r.pendingRow for GetNextBatch to consume.
+// openCurrentFile reads r.files[r.fileIdx] into r.data and validates the
+// first row's field count. Sets r.pos = 0 so GetNextBatch rescans from the
+// beginning of the file (including the first row).
 func (r *FileTableReader) openCurrentFile() error {
-	f, err := os.Open(r.files[r.fileIdx])
+	data, err := os.ReadFile(r.files[r.fileIdx])
 	if err != nil {
 		return fmt.Errorf("open %q: %w", r.files[r.fileIdx], err)
 	}
-
-	csvr := csv.NewReader(f)
-	rec, err := csvr.Read()
-	if err == io.EOF {
-		f.Close()
+	if len(data) == 0 {
 		return r.advanceFile()
 	}
-	if err != nil {
-		f.Close()
+	if err := validateFirstRowBytes(data, len(r.schema.Columns)); err != nil {
 		return fmt.Errorf("%s: %w", filepath.Base(r.files[r.fileIdx]), err)
 	}
-	if err := validateFieldCount(r.schema, rec); err != nil {
-		f.Close()
-		return fmt.Errorf("%s: %w", filepath.Base(r.files[r.fileIdx]), err)
-	}
-
-	r.file = f
-	r.csv = csvr
-	r.pendingRow = rec
+	r.data = data
+	r.pos = 0
 	return nil
 }
 
-// advanceFile closes the current file and opens the next one.
+// advanceFile releases the current file buffer and loads the next file.
 // Sets r.done = true when all files have been read.
 func (r *FileTableReader) advanceFile() error {
-	if r.file != nil {
-		r.file.Close()
-		r.file = nil
-		r.csv = nil
-	}
+	r.data = nil
+	r.pos = 0
 	r.fileIdx++
 	if r.fileIdx >= len(r.files) {
 		r.done = true
 		return nil
 	}
 	return r.openCurrentFile()
-}
-
-// nextRow returns the next CSV record. It drains r.pendingRow first.
-func (r *FileTableReader) nextRow() ([]string, error) {
-	if r.pendingRow != nil {
-		row := r.pendingRow
-		r.pendingRow = nil
-		return row, nil
-	}
-	return r.csv.Read()
 }
 
 // GetNextBatch returns the next dense batch of up to batchSize rows.
@@ -156,8 +134,8 @@ func (r *FileTableReader) GetNextBatch() (*batch.Batch, error) {
 
 		rows := 0
 		for rows < r.batchSize {
-			rec, err := r.nextRow()
-			if err == io.EOF {
+			rec := scanRow(r.data, &r.pos, len(r.schema.Columns))
+			if rec == nil {
 				if advErr := r.advanceFile(); advErr != nil {
 					return nil, advErr
 				}
@@ -166,13 +144,10 @@ func (r *FileTableReader) GetNextBatch() (*batch.Batch, error) {
 				}
 				continue
 			}
-			if err != nil {
-				return nil, err
-			}
 
 			// Leading skip: first selected entry only, skip rows before start.
 			if !r.start.IsZero() && r.fileIdx == 0 {
-				ts, _ := time.Parse(datetimeFormat, rec[0])
+				ts, _ := time.Parse(datetimeFormat, string(rec[0]))
 				if ts.Before(r.start) {
 					continue
 				}
@@ -180,7 +155,7 @@ func (r *FileTableReader) GetNextBatch() (*batch.Batch, error) {
 
 			// Trailing stop: last selected entry only, stop when past end.
 			if !r.end.IsZero() && r.fileIdx == len(r.files)-1 {
-				ts, _ := time.Parse(datetimeFormat, rec[0])
+				ts, _ := time.Parse(datetimeFormat, string(rec[0]))
 				if ts.After(r.end) {
 					r.done = true
 					break
@@ -188,7 +163,7 @@ func (r *FileTableReader) GetNextBatch() (*batch.Batch, error) {
 			}
 
 			for i, b := range r.colBuilders {
-				b.Append(rec[i])
+				b.AppendBytes(rec[i])
 			}
 			rows++
 		}
@@ -230,14 +205,9 @@ func (r *FileTableReader) GetNextBatch() (*batch.Batch, error) {
 	}
 }
 
-// Close releases the open file handle.
+// Close releases the in-memory file buffer.
 func (r *FileTableReader) Close() error {
-	if r.file != nil {
-		err := r.file.Close()
-		r.file = nil
-		r.csv = nil
-		return err
-	}
+	r.data = nil
 	return nil
 }
 
@@ -350,11 +320,119 @@ func compactNullBits(nulls []uint64, passing []int) []uint64 {
 }
 
 // validateFieldCount returns an error if the CSV record field count does not
-// match the schema column count.
+// match the schema column count. Used by BlobTableReader which still uses
+// csv.Reader.
 func validateFieldCount(schema *Schema, rec []string) error {
 	if len(rec) != len(schema.Columns) {
 		return fmt.Errorf("field count mismatch: schema has %d columns, row has %d fields",
 			len(schema.Columns), len(rec))
 	}
 	return nil
+}
+
+// validateFirstRowBytes counts fields in the first line of data and returns an
+// error if the count does not match nCols.
+func validateFirstRowBytes(data []byte, nCols int) error {
+	count := 0
+	quoted := false
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case '"':
+			quoted = !quoted
+		case ',':
+			if !quoted {
+				count++
+			}
+		case '\n', '\r':
+			if !quoted {
+				count++ // include the last field
+				if count != nCols {
+					return fmt.Errorf("field count mismatch: schema has %d columns, row has %d fields", nCols, count)
+				}
+				return nil
+			}
+		}
+	}
+	// EOF without a trailing newline.
+	count++
+	if count != nCols {
+		return fmt.Errorf("field count mismatch: schema has %d columns, row has %d fields", nCols, count)
+	}
+	return nil
+}
+
+// scanRow reads the next CSV row from data starting at *pos, advances *pos
+// past the row's terminating newline, and returns a slice of length nCols
+// whose entries are sub-slices of data (zero allocation for unquoted fields).
+// Returns nil when *pos >= len(data).
+func scanRow(data []byte, pos *int, nCols int) [][]byte {
+	p := *pos
+	if p >= len(data) {
+		return nil
+	}
+	fields := make([][]byte, nCols)
+	for col := 0; col < nCols; col++ {
+		if p >= len(data) || data[p] == '\n' || data[p] == '\r' {
+			break
+		}
+		if data[p] == '"' {
+			field, after := scanQuotedField(data, p)
+			fields[col] = field
+			p = after
+		} else {
+			start := p
+			for p < len(data) && data[p] != ',' && data[p] != '\n' && data[p] != '\r' {
+				p++
+			}
+			fields[col] = data[start:p]
+		}
+		if p < len(data) && data[p] == ',' {
+			p++
+		}
+	}
+	// Advance past the end of the line.
+	for p < len(data) && data[p] != '\n' {
+		p++
+	}
+	if p < len(data) {
+		p++ // skip '\n'
+	}
+	*pos = p
+	return fields
+}
+
+// scanQuotedField scans a double-quoted CSV field from data[pos:] where pos
+// points at the opening '"'. Returns the unescaped field ("" → ") and the
+// position immediately after the closing '"'.
+func scanQuotedField(data []byte, pos int) (field []byte, next int) {
+	pos++ // skip opening '"'
+	start := pos
+	hasEscape := false
+	for pos < len(data) {
+		if data[pos] == '"' {
+			if pos+1 < len(data) && data[pos+1] == '"' {
+				hasEscape = true
+				pos += 2
+				continue
+			}
+			break // closing quote
+		}
+		pos++
+	}
+	raw := data[start:pos]
+	if pos < len(data) {
+		pos++ // skip closing '"'
+	}
+	if !hasEscape {
+		return raw, pos // zero-alloc: slice into data
+	}
+	// Unescape '""' → '"'.
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		out = append(out, raw[i])
+		if raw[i] == '"' && i+1 < len(raw) && raw[i+1] == '"' {
+			i++
+		}
+	}
+	return out, pos
 }
