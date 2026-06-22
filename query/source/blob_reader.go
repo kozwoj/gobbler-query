@@ -222,9 +222,13 @@ func (r *BlobTableReader) GetNextBatch() (*batch.Batch, error) {
 		candidate := &batch.Batch{Length: rows, Schema: meta, Columns: cols}
 
 		if r.opts != nil && r.opts.Pred != nil {
+			predBatch := candidate
+			if r.opts.PredCols != nil {
+				predBatch = projectBatch(candidate, r.opts.PredCols)
+			}
 			passing := make([]int, 0, rows)
 			for row := 0; row < rows; row++ {
-				ok, err := r.opts.Pred(candidate, row)
+				ok, err := r.opts.Pred(predBatch, row)
 				if err != nil {
 					return nil, err
 				}

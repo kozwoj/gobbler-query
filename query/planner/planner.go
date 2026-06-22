@@ -78,9 +78,55 @@ func (p *planner) buildSource(n *logical.LogicalSource) (physical.Operator, erro
 	return &physical.SourceOp{Reader: reader}, nil
 }
 
+// buildSourceWithOpts creates a SourceOp for src with the supplied
+// ReaderOptions. All pushdown build paths (Steps 7–10) use this instead of
+// duplicating the catalog-lookup and reader-construction logic.
+func (p *planner) buildSourceWithOpts(src *logical.LogicalSource, opts *source.ReaderOptions) (physical.Operator, error) {
+	entry, ok := p.cat[src.TypeName]
+	if !ok {
+		return nil, fmt.Errorf("planner: table %q not in catalog", src.TypeName)
+	}
+	reader, err := source.NewTableReader(entry, src.Start, src.End, p.batchSize, opts)
+	if err != nil {
+		return nil, fmt.Errorf("planner: open %q: %w", src.TypeName, err)
+	}
+	return &physical.SourceOp{Reader: reader}, nil
+}
+
 // ─── Where ────────────────────────────────────────────────────────────────────
 
 func (p *planner) buildWhere(n *logical.LogicalWhere) (physical.Operator, error) {
+	// Pushdown: Where → Source and Where → Project → Source patterns.
+	if plan := analyzePushdown(n); plan.Kind == pushdownPred || plan.Kind == pushdownColsThenPred {
+		pred, err := expr.Compile(plan.Where.Pred)
+		if err != nil {
+			return nil, fmt.Errorf("planner: where (pushdown): %w", err)
+		}
+		if plan.Kind == pushdownPred {
+			return p.buildSourceWithOpts(plan.Source, &source.ReaderOptions{Pred: pred})
+		}
+		// pushdownColsThenPred: pred references projected-schema column names;
+		// eval against projectBatch(candidate, wantCols) via PredCols.
+		srcSchema, err := p.inferTypedSchema(plan.Source)
+		if err != nil {
+			return nil, err
+		}
+		wantCols := make([]int, len(plan.Project.Items))
+		for i, item := range plan.Project.Items {
+			ref := item.Expr.(*ast.FieldRefExpr).Ref
+			idx, err := colIndexInTypedSchema(srcSchema, ref)
+			if err != nil {
+				return nil, fmt.Errorf("planner: where (pushdown cols+pred): %w", err)
+			}
+			wantCols[i] = idx
+		}
+		return p.buildSourceWithOpts(plan.Source, &source.ReaderOptions{
+			Pred:     pred,
+			WantCols: wantCols,
+			PredCols: wantCols,
+		})
+	}
+
 	input, err := p.build(n.Input)
 	if err != nil {
 		return nil, err
@@ -95,6 +141,32 @@ func (p *planner) buildWhere(n *logical.LogicalWhere) (physical.Operator, error)
 // ─── Project ──────────────────────────────────────────────────────────────────
 
 func (p *planner) buildProject(n *logical.LogicalProject) (physical.Operator, error) {
+	// Pushdown: Project → Source  and  Project → Where → Source patterns.
+	if plan := analyzePushdown(n); plan.Kind == pushdownCols || plan.Kind == pushdownPredThenCols {
+		srcSchema, err := p.inferTypedSchema(plan.Source)
+		if err != nil {
+			return nil, err
+		}
+		wantCols := make([]int, len(plan.Project.Items))
+		for i, item := range plan.Project.Items {
+			ref := item.Expr.(*ast.FieldRefExpr).Ref
+			idx, err := colIndexInTypedSchema(srcSchema, ref)
+			if err != nil {
+				return nil, fmt.Errorf("planner: project (pushdown): %w", err)
+			}
+			wantCols[i] = idx
+		}
+		opts := &source.ReaderOptions{WantCols: wantCols}
+		if plan.Kind == pushdownPredThenCols {
+			pred, err := expr.Compile(plan.Where.Pred)
+			if err != nil {
+				return nil, fmt.Errorf("planner: project (pushdown pred+cols): %w", err)
+			}
+			opts.Pred = pred
+		}
+		return p.buildSourceWithOpts(plan.Source, opts)
+	}
+
 	// Re-run per-item type inference to get output types for CompiledProjectItem.
 	// InferAndValidate already validated the plan, so errors here are unexpected.
 	inputSchema, err := p.inferTypedSchema(n.Input)

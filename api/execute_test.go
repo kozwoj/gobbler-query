@@ -196,6 +196,105 @@ func TestExecute_SummarizeAvg_DurationMs_ByStatusCode(t *testing.T) {
 	}
 }
 
+func TestExecute_WherePushdown_PartitionCheck(t *testing.T) {
+	// Where → Source pushdown: the above-threshold and below-threshold
+	// partitions must together equal the full scan count.
+	total := intVal(run(t, `requests (*) | count`), 0, 0)
+	above := intVal(run(t, `requests (*) | where statusCode >= 400 | count`), 0, 0)
+	below := intVal(run(t, `requests (*) | where statusCode < 400 | count`), 0, 0)
+	if above+below != total {
+		t.Errorf("above(%d) + below(%d) = %d, want %d (total)", above, below, above+below, total)
+	}
+	if above == 0 || below == 0 {
+		t.Errorf("expected both partitions non-empty: above=%d below=%d", above, below)
+	}
+}
+
+func TestExecute_WherePushdown_ValuesCorrect(t *testing.T) {
+	// Every row returned by the pushed-down where must satisfy the predicate.
+	r := run(t, `requests (*) | where statusCode >= 400`)
+	cIdx := colIdx(r, "statusCode")
+	if cIdx < 0 {
+		t.Fatal("statusCode column missing")
+	}
+	for i := range r.Rows {
+		if sc := intVal(r, i, cIdx); sc < 400 {
+			t.Errorf("row %d: statusCode = %d, want >= 400", i, sc)
+		}
+	}
+	if len(r.Rows) == 0 {
+		t.Error("expected at least one row")
+	}
+}
+
+func TestExecute_ProjectPushdown_NarrowSchema(t *testing.T) {
+	// Project → Source: output schema must contain exactly the projected columns.
+	r := run(t, `requests (*) | project userId, statusCode`)
+	if len(r.Schema) != 2 {
+		t.Fatalf("schema width = %d, want 2 (userId, statusCode)", len(r.Schema))
+	}
+	if r.Schema[0].Name != "userId" {
+		t.Errorf("col[0] = %q, want %q", r.Schema[0].Name, "userId")
+	}
+	if r.Schema[1].Name != "statusCode" {
+		t.Errorf("col[1] = %q, want %q", r.Schema[1].Name, "statusCode")
+	}
+	// All 7000 rows must still be present — project does not filter.
+	if len(r.Rows) != 7000 {
+		t.Errorf("row count = %d, want 7000", len(r.Rows))
+	}
+}
+
+func TestExecute_ProjectPushdown_ValuesCorrect(t *testing.T) {
+	// Every row must have a plausible statusCode; userId may be null (nil).
+	r := run(t, `requests (*) | project userId, statusCode`)
+	scIdx := colIdx(r, "statusCode")
+	if scIdx < 0 {
+		t.Fatal("expected statusCode column")
+	}
+	for i := range r.Rows {
+		if sc := intVal(r, i, scIdx); sc < 100 || sc > 599 {
+			t.Errorf("row %d: statusCode = %d, want 100–599", i, sc)
+			break
+		}
+	}
+}
+
+func TestExecute_WhereThenProjectPushdown_Schema(t *testing.T) {
+	// Project → Where → Source: schema is narrow and every row satisfies the predicate.
+	r := run(t, `requests (*) | where statusCode >= 400 | project userId, statusCode`)
+	if len(r.Schema) != 2 {
+		t.Fatalf("schema width = %d, want 2 (userId, statusCode)", len(r.Schema))
+	}
+	if r.Schema[0].Name != "userId" || r.Schema[1].Name != "statusCode" {
+		t.Errorf("schema = [%s, %s], want [userId, statusCode]", r.Schema[0].Name, r.Schema[1].Name)
+	}
+	scIdx := colIdx(r, "statusCode")
+	for i := range r.Rows {
+		if sc := intVal(r, i, scIdx); sc < 400 {
+			t.Errorf("row %d: statusCode = %d, want >= 400", i, sc)
+			break
+		}
+	}
+	if len(r.Rows) == 0 {
+		t.Error("expected at least one row")
+	}
+}
+
+func TestExecute_WhereThenProjectPushdown_CrossCheck(t *testing.T) {
+	// Row count of the combined pushdown must equal the standalone where count.
+	narrow := run(t, `requests (*) | where statusCode >= 400 | project userId, statusCode`)
+	baseline := run(t, `requests (*) | where statusCode >= 400 | count`)
+	if len(baseline.Rows) != 1 {
+		t.Fatal("count query returned wrong number of rows")
+	}
+	want := intVal(baseline, 0, 0)
+	got := int64(len(narrow.Rows))
+	if got != want {
+		t.Errorf("pushdown row count = %d, standalone where count = %d", got, want)
+	}
+}
+
 func TestExecute_Where_Login_ThenCountByRegion(t *testing.T) {
 	r := run(t, `requests (*) | where requestCode == "login" | summarize n = count() by region`)
 	nIdx := colIdx(r, "n")
@@ -212,6 +311,36 @@ func TestExecute_Where_Login_ThenCountByRegion(t *testing.T) {
 	// Must be less than 7000 (filter removed non-login rows).
 	if total >= 7000 {
 		t.Errorf("filtered count = %d, want < 7000", total)
+	}
+}
+
+func TestExecute_ProjectThenWherePushdown_Schema(t *testing.T) {
+	// Where → Project → Source: output must be narrow and satisfy the predicate.
+	r := run(t, `requests (*) | project userId, statusCode | where statusCode >= 400`)
+	if len(r.Schema) != 2 {
+		t.Fatalf("schema width = %d, want 2 (userId, statusCode)", len(r.Schema))
+	}
+	if r.Schema[0].Name != "userId" || r.Schema[1].Name != "statusCode" {
+		t.Errorf("schema = [%s, %s], want [userId, statusCode]", r.Schema[0].Name, r.Schema[1].Name)
+	}
+	scIdx := colIdx(r, "statusCode")
+	for i := range r.Rows {
+		if sc := intVal(r, i, scIdx); sc < 400 {
+			t.Errorf("row %d: statusCode = %d, want >= 400", i, sc)
+			break
+		}
+	}
+	if len(r.Rows) == 0 {
+		t.Error("expected at least one row")
+	}
+}
+
+func TestExecute_ProjectThenWherePushdown_CrossCheck(t *testing.T) {
+	// Row count must match the equivalent where-then-project pushdown (Step 9).
+	gotR := run(t, `requests (*) | project userId, statusCode | where statusCode >= 400`)
+	wantR := run(t, `requests (*) | where statusCode >= 400 | project userId, statusCode`)
+	if len(gotR.Rows) != len(wantR.Rows) {
+		t.Errorf("project-then-where row count = %d, where-then-project = %d", len(gotR.Rows), len(wantR.Rows))
 	}
 }
 

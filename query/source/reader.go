@@ -27,6 +27,12 @@ type ReaderOptions struct {
 	// WantCols is the sorted list of column indices (into the source schema)
 	// that must appear in the output batch. nil means all columns.
 	WantCols []int
+	// PredCols, when non-nil, causes Pred to be evaluated against a projected
+	// batch built from these source column indices instead of the full candidate
+	// batch. Use this when the predicate was compiled against the projected
+	// schema (column names match WantCols). For a pure-column-select project,
+	// PredCols equals WantCols.
+	PredCols []int
 }
 
 // NewTableReader constructs the appropriate TableReader based on entry.Mode.
