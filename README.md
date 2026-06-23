@@ -305,6 +305,7 @@ Key design documents:
 | [docs/source-layer.md](docs/source-layer.md) | Catalog, schema parsing, file selection by time window |
 | [docs/cli-design.md](docs/cli-design.md) | `gq` command structure, noun/verb design, catalog file resolution |
 | [docs/gql_grammar.ebnf](docs/gql_grammar.ebnf) | Formal EBNF grammar for GQL |
+| [docs/pushdown-optimization.md](docs/pushdown-optimization.md) | Pushdown optimization of filtering and projection |
 
 ---
 

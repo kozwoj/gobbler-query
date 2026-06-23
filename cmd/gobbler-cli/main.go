@@ -20,7 +20,8 @@ Usage:
 
 Global Flags:
   --catalog <path>   catalog file to use (default: ` + defaultCatalog + `)
-                     a .gobbler.json in the current directory takes precedence
+                     if omitted, .gobbler.json in the current directory is used
+                     when present, otherwise the default path above is used
 
 Nouns:
   catalog   manage table registrations
