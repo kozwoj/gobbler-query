@@ -49,7 +49,7 @@ type storedItemDef struct {
 var requestsTypeDef = storedItemDef{
 	Name: "requests",
 	OrderedColumns: []storedColumn{
-		{Name: "timestamp", Type: "datetime"},
+		{Name: "ingest_time", Type: "datetime"},
 		{Name: "requestId", Type: "string"},
 		{Name: "userId", Type: "string"},
 		{Name: "requestCode", Type: "string"},
@@ -63,7 +63,7 @@ var requestsTypeDef = storedItemDef{
 var usersTypeDef = storedItemDef{
 	Name: "users",
 	OrderedColumns: []storedColumn{
-		{Name: "timestamp", Type: "datetime"},
+		{Name: "ingest_time", Type: "datetime"},
 		{Name: "userId", Type: "string"},
 		{Name: "tier", Type: "string"},
 		{Name: "active", Type: "bool"},

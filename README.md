@@ -41,7 +41,7 @@ Gobbler Query was written as an exercise of implementing a pipeline query engine
 
 ## How Gobbler Stores Data
 
-Gobbler Query analyzes data ingested and stored by Gobbler server. Gobbler ingests, validates and stores telemetry items of predefined types. Items of the same type are stored in type-specific CSV files. Once an items is validated Gobbler prepends the ingest timestamp in the first property called `timestamp`. Since the items are stored in the order they arrived, they are stored in the ingest time sequence. Gobbler creates one directory (or Azure container) per item type. The directory name comes from the `folder` field in the item definition (defaults to type `name` if `folder` is not given). Each directory holds item schema file and a series of time-stamped CSV data files, one per rotation period:
+Gobbler Query analyzes data ingested and stored by Gobbler server. Gobbler ingests, validates and stores telemetry items of predefined types. Items of the same type are stored in type-specific CSV files. Once an items is validated Gobbler prepends the ingest timestamp in the first property called `ingest_time`. Since the items are stored in the order they arrived, they are stored in the ingest time sequence. Gobbler creates one directory (or Azure container) per item type. The directory name comes from the `folder` field in the item definition (defaults to type `name` if `folder` is not given). Each directory holds item schema file and a series of time-stamped CSV data files, one per rotation period:
 
 ```mermaid
 ---
@@ -198,7 +198,7 @@ A `.gobbler.json` file in `<home>/.gobbler` directory takes precedence (useful f
 gq --catalog ./my-project.json query run "requests (*) | count"
 ```
 
-For tables stored in Azure Blob Storage provide account name and place the SSA key in environment variable named `GOBBLER_KEY_{keyName}` as shown in the example below (CLI capitalizes value of the --account argument):
+For tables stored in Azure Blob Storage provide account name and place the SSA key in environment variable named `GOBBLER_KEY_{accountName}` as shown in the example below (CLI capitalizes value of the --account argument):
 
 ```sh
 gq catalog add requests --account myaccount --container requests

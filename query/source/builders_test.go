@@ -204,7 +204,7 @@ func TestBuilderReset_NullBitsCleared(t *testing.T) {
 func TestNewColumnBuilders(t *testing.T) {
 	schema := &Schema{
 		Columns: []ColumnSchema{
-			{Name: "timestamp", Type: TypeDatetime},
+			{Name: "ingest_time", Type: TypeDatetime},
 			{Name: "count", Type: TypeInt32},
 			{Name: "ratio", Type: TypeFloat64},
 			{Name: "label", Type: TypeString},

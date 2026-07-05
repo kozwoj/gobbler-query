@@ -128,7 +128,7 @@ func TestFileTableReader_ColumnMeta(t *testing.T) {
 	}
 
 	wantMeta := []batch.ColumnMeta{
-		{Name: "timestamp", Origin: "requests", Type: TypeDatetime},
+		{Name: "ingest_time", Origin: "requests", Type: TypeDatetime},
 		{Name: "requestId", Origin: "requests", Type: TypeString},
 		{Name: "userId", Origin: "requests", Type: TypeString},
 		{Name: "requestCode", Origin: "requests", Type: TypeString},

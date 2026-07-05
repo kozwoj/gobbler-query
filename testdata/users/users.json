@@ -2,7 +2,7 @@
   "name": "users",
   "orderedColumns": [
     {
-      "name": "timestamp",
+      "name": "ingest_time",
       "type": "datetime"
     },
     {

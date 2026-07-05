@@ -2,7 +2,7 @@
   "name": "requests",
   "orderedColumns": [
     {
-      "name": "timestamp",
+      "name": "ingest_time",
       "type": "datetime"
     },
     {

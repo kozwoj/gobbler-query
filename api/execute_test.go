@@ -758,7 +758,7 @@ func dynamicCatalog(t *testing.T) catalog.Catalog {
 	typeJSON := `{
   "name": "events",
   "orderedColumns": [
-    {"name": "timestamp", "type": "datetime"},
+    {"name": "ingest_time", "type": "datetime"},
     {"name": "id",        "type": "string"},
     {"name": "meta",      "type": "dynamic"},
     {"name": "score",     "type": "int"}

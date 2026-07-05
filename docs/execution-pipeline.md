@@ -340,7 +340,7 @@ The second break is trivially cheap here — `summarize` has already collapsed t
 
 >**Note:** Put the smaller relation on the right. In the future the join stage may optimize the build side bases on statistics. 
 
-**Time window** — the source time window (`last 24h`, `datetime(T1) .. datetime(T2)`, `*`) is passed to `SourceOp` at construction time, and not translated into a `FilterOp` like in KQL. The source layer handles file-level pruning and boundary-row filtering internally; the pipeline has no knowledge of the window. Explicit `timestamp` predicates in `where` stages are independent ordinary expressions evaluated by `FilterOp` and may or may not be consistent with the source time window.
+**Time window** — the source time window (`last 24h`, `datetime(T1) .. datetime(T2)`, `*`) is passed to `SourceOp` at construction time, and not translated into a `FilterOp` like in KQL. The source layer handles file-level pruning and boundary-row filtering internally; the pipeline has no knowledge of the window. Explicit `ingest_time` predicates in `where` stages are independent ordinary expressions evaluated by `FilterOp` and may or may not be consistent with the source time window.
 
 ---
 ## 6. End-to-End Examples
@@ -350,7 +350,7 @@ The second break is trivially cheap here — `summarize` has already collapsed t
 ```
 Logs(last 1h)
 | where statusCode >= 400
-| project timestamp, region
+| project ingest_time, region
 | take 3
 ```
 
@@ -358,13 +358,13 @@ Logs(last 1h)
 ```
 Query
   Source: "Logs", TimeWindow: last 1h
-  Stages: Where(statusCode >= 400) · Project(timestamp, region) · Take(3)
+  Stages: Where(statusCode >= 400) · Project(ingest_time, region) · Take(3)
 ```
 
 **Logical plan:**
 ```
 LogicalTake(3)
-  LogicalProject(timestamp, region)
+  LogicalProject(ingest_time, region)
     LogicalWhere(statusCode >= 400)
       LogicalSource("Logs", last 1h)
 ```
@@ -372,7 +372,7 @@ LogicalTake(3)
 **Physical plan:**
 ```
 LimitOp(3)
-  ProjectOp(timestamp, region)
+  ProjectOp(ingest_time, region)
     FilterOp(statusCode >= 400)
       SourceOp  ← opens and reads only files within last 1h; skips boundary rows outside that time window
 ```

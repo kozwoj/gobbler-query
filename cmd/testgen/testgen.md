@@ -33,8 +33,8 @@ Flags: `-seed int`, `-out string`, `-rows int` (rows per file, default 500), `-f
 ## Gobbler File Conventions
 
 - Filename: `2006-01-02_15-04-05.000_<typeName>.csv`
-- `{typeName}.json`: `{"name":"...","orderedColumns":[{"name":"timestamp","type":"datetime"}, ...]}`
-- `timestamp` is always column 0 and is always prepended by gobbler
+- `{typeName}.json`: `{"name":"...","orderedColumns":[{"name":"ingest_time","type":"datetime"}, ...]}`
+- `ingest_time` is always column 0 and is always prepended by gobbler
 - CSV rows: no header; values in `orderedColumns` order; empty string = null
 - Datetime format: `2006-01-02 15:04:05.000`
 - Timespan format: TBD (see open questions)
@@ -55,7 +55,7 @@ Event stream. Two CSV files per simulated day (one per 12-hour window), 500 rows
 
 | Column | Type | Notes |
 |---|---|---|
-| `timestamp` | datetime | event time (col 0, always present) |
+| `ingest_time` | datetime | event time (col 0, always present) |
 | `requestId` | string | unique per row |
 | `userId` | string | **join key** → `users.userId` |
 | `requestCode` | string | one of the fixed auth-service request kinds |
@@ -85,16 +85,16 @@ Dimension table, low-volume (~50 rows), one CSV file.
 
 | Column | Type | Notes |
 |---|---|---|
-| `timestamp` | datetime | ingest time (col 0, always present) |
+| `ingest_time` | datetime | ingest time (col 0, always present) |
 | `userId` | string | unique, join key |
 | `tier` | string | free / pro / enterprise |
 | `active` | bool | |
 | `countryCode` | string | ISO 3166-1 alpha-2 |
 | `signupDate` | datetime | second datetime column |
 
-> **Note**: because every gobbler type has `timestamp`, a join of `requests` and
-> `users` produces two `timestamp` columns — one per origin. Queries after the
-> join must qualify the reference (`requests.timestamp`) unless the sub-query
+> **Note**: because every gobbler type has `ingest_time`, a join of `requests` and
+> `users` produces two `ingest_time` columns — one per origin. Queries after the
+> join must qualify the reference (`requests.ingest_time`) unless the sub-query
 > projected it away. This ambiguity is the primary motivation for the
 > `ColumnMeta.Origin` design.
 
@@ -113,7 +113,7 @@ The test suite for the source/physical/expr layers will exercise:
 | `sort by durationMs desc \| take N` | requests |
 | `join (users \| project userId, tier) on userId` | requests + users |
 | `where active == true` (post-join) | users column post-join |
-| `project requests.timestamp, ...` (qualified ref post-join) | join result |
+| `project requests.ingest_time, ...` (qualified ref post-join) | join result |
 | `count` | either |
 
 ## File Selection Expectations
@@ -149,7 +149,7 @@ Summary of settled parameters:
   `time.ParseDuration` on the reader side.
 - **`signupDate` generation**: uniformly distributed between 2025-01-01 and
   2026-04-01 — months before the request window — so it is never confused with
-  ingest `timestamp`.
+  ingest `ingest_time`.
 - **Null representation**: empty string in CSV (`,,`). Optional fields (`userId`,
   `region`, `ttl`, `countryCode`) emit null at rates 5%, 3%, 10%, and 5%
   respectively.

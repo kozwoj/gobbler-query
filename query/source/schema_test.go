@@ -17,7 +17,7 @@ func TestParseSchema_Requests(t *testing.T) {
 	}
 
 	want := []ColumnSchema{
-		{Name: "timestamp", Type: TypeDatetime},
+		{Name: "ingest_time", Type: TypeDatetime},
 		{Name: "requestId", Type: TypeString},
 		{Name: "userId", Type: TypeString},
 		{Name: "requestCode", Type: TypeString},
@@ -53,8 +53,8 @@ func TestParseSchema_Users(t *testing.T) {
 	if len(schema.Columns) == 0 {
 		t.Fatal("schema has no columns")
 	}
-	if schema.Columns[0].Name != "timestamp" || schema.Columns[0].Type != TypeDatetime {
-		t.Errorf("column[0]: got {%q, %d}, want {\"timestamp\", TypeDatetime}", schema.Columns[0].Name, schema.Columns[0].Type)
+	if schema.Columns[0].Name != "ingest_time" || schema.Columns[0].Type != TypeDatetime {
+		t.Errorf("column[0]: got {%q, %d}, want {\"ingest_time\", TypeDatetime}", schema.Columns[0].Name, schema.Columns[0].Type)
 	}
 }
 

@@ -21,13 +21,13 @@ func mkCol(name string, t source.ColumnType) source.ColumnSchema {
 // testSchemas is a shared catalog of source schemas used across all Stage-1 tests.
 var testSchemas = map[string]*source.Schema{
 	"requests": mkSchema(
-		mkCol("timestamp", source.TypeDatetime),
+		mkCol("ingest_time", source.TypeDatetime),
 		mkCol("statusCode", source.TypeInt32),
 		mkCol("region", source.TypeString),
 		mkCol("durationMs", source.TypeFloat64),
 	),
 	"users": mkSchema(
-		mkCol("timestamp", source.TypeDatetime),
+		mkCol("ingest_time", source.TypeDatetime),
 		mkCol("userId", source.TypeString),
 		mkCol("tier", source.TypeString),
 	),
@@ -98,7 +98,7 @@ func TestInferAndValidate_Count_UnknownSource_Propagates(t *testing.T) {
 func TestInferAndValidate_Sort_ValidField(t *testing.T) {
 	node := &LogicalSort{
 		Input: src("requests"),
-		Items: []ast.SortItem{{Field: ast.FieldRef{Name: "timestamp"}, Dir: ast.SortDesc}},
+		Items: []ast.SortItem{{Field: ast.FieldRef{Name: "ingest_time"}, Dir: ast.SortDesc}},
 	}
 	_, err := InferAndValidate(node, testSchemas)
 	if err != nil {
@@ -226,7 +226,7 @@ func TestInferAndValidate_Where_DatetimeWithAgo(t *testing.T) {
 	node := &LogicalWhere{
 		Input: src("requests"),
 		Pred: &ast.CompareExpr{
-			Left:  &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}},
+			Left:  &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}},
 			Op:    ast.CmpGt,
 			Right: &ast.AgoExpr{Duration: ast.TimespanLit{Duration: time.Hour}},
 		},
@@ -299,7 +299,7 @@ func TestInferAndValidate_Project_BareRef(t *testing.T) {
 	node := &LogicalProject{
 		Input: src("requests"),
 		Items: []ast.ProjectItem{
-			{Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}}},
+			{Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}}},
 			{Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "statusCode"}}},
 		},
 	}
@@ -310,8 +310,8 @@ func TestInferAndValidate_Project_BareRef(t *testing.T) {
 	if len(meta) != 2 {
 		t.Fatalf("len = %d, want 2", len(meta))
 	}
-	if meta[0].Name != "timestamp" || meta[0].Origin != "requests" {
-		t.Errorf("meta[0] = %+v, want {timestamp requests}", meta[0])
+	if meta[0].Name != "ingest_time" || meta[0].Origin != "requests" {
+		t.Errorf("meta[0] = %+v, want {ingest_time requests}", meta[0])
 	}
 	if meta[1].Name != "statusCode" || meta[1].Origin != "requests" {
 		t.Errorf("meta[1] = %+v, want {statusCode requests}", meta[1])
@@ -335,7 +335,7 @@ func TestInferAndValidate_Project_Rename(t *testing.T) {
 	node := &LogicalProject{
 		Input: src("requests"),
 		Items: []ast.ProjectItem{
-			{Alias: "ts", Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}}},
+			{Alias: "ts", Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}}},
 		},
 	}
 	meta, err := InferAndValidate(node, testSchemas)
@@ -365,14 +365,14 @@ func TestInferAndValidate_Project_Rename_Missing(t *testing.T) {
 }
 
 func TestInferAndValidate_Project_Compute_OutputName(t *testing.T) {
-	// dur = timestamp - timestamp → timespan; computed col gets Origin="".
+	// dur = ingest_time - ingest_time → timespan; computed col gets Origin="".
 	node := &LogicalProject{
 		Input: src("requests"),
 		Items: []ast.ProjectItem{
 			{Alias: "dur", Expr: &ast.BinaryExpr{
-				Left:  &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}},
+				Left:  &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}},
 				Op:    ast.BinSub,
-				Right: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}},
+				Right: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}},
 			}},
 		},
 	}
@@ -437,11 +437,11 @@ func TestInferAndValidate_Project_Compute_MissingField(t *testing.T) {
 }
 
 func TestInferAndValidate_Project_ChainedWithWhere(t *testing.T) {
-	// project ts = timestamp | where ts > ago(1h)  — ts is in projected schema.
+	// project ts = ingest_time | where ts > ago(1h)  — ts is in projected schema.
 	proj := &LogicalProject{
 		Input: src("requests"),
 		Items: []ast.ProjectItem{
-			{Alias: "ts", Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}}},
+			{Alias: "ts", Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}}},
 		},
 	}
 	node := &LogicalWhere{
@@ -459,11 +459,11 @@ func TestInferAndValidate_Project_ChainedWithWhere(t *testing.T) {
 }
 
 func TestInferAndValidate_Project_ChainedWhere_DroppedField(t *testing.T) {
-	// After project timestamp, statusCode is dropped; where on statusCode must fail.
+	// After project ingest_time, statusCode is dropped; where on statusCode must fail.
 	proj := &LogicalProject{
 		Input: src("requests"),
 		Items: []ast.ProjectItem{
-			{Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "timestamp"}}},
+			{Expr: &ast.FieldRefExpr{Ref: ast.FieldRef{Name: "ingest_time"}}},
 		},
 	}
 	node := &LogicalWhere{
@@ -561,7 +561,7 @@ func TestInferAndValidate_Summarize_Avg_OutputIsFloat64(t *testing.T) {
 func TestInferAndValidate_Summarize_Min_Datetime(t *testing.T) {
 	node := &LogicalSummarize{
 		Input: src("requests"),
-		Aggs:  []ast.AggItem{aggField(ast.AggMin, "", "timestamp")},
+		Aggs:  []ast.AggItem{aggField(ast.AggMin, "", "ingest_time")},
 	}
 	_, err := InferAndValidate(node, testSchemas)
 	if err != nil {
@@ -639,8 +639,8 @@ func TestInferAndValidate_Summarize_GroupBy_MissingField_IsError(t *testing.T) {
 // ─── Join ─────────────────────────────────────────────────────────────────────
 
 func TestInferAndValidate_Join_SameNameKey_Valid(t *testing.T) {
-	// requests (timestamp, statusCode, region, durationMs)
-	// join users (timestamp, userId, tier) on userId → userId not in requests!
+	// requests (ingest_time, statusCode, region, durationMs)
+	// join users (ingest_time, userId, tier) on userId → userId not in requests!
 	// Use a sub-query that projects userId first.
 	// Actually: join users on a key that exists in both. Let's add userId to a
 	// projected requests and join against users.
@@ -650,12 +650,12 @@ func TestInferAndValidate_Join_SameNameKey_Valid(t *testing.T) {
 	// Instead, add a "logins" schema sharing userId with users.
 	logins := map[string]*source.Schema{
 		"logins": mkSchema(
-			mkCol("timestamp", source.TypeDatetime),
+			mkCol("ingest_time", source.TypeDatetime),
 			mkCol("userId", source.TypeString),
 			mkCol("action", source.TypeString),
 		),
 		"users": mkSchema(
-			mkCol("timestamp", source.TypeDatetime),
+			mkCol("ingest_time", source.TypeDatetime),
 			mkCol("userId", source.TypeString),
 			mkCol("tier", source.TypeString),
 		),
@@ -669,9 +669,9 @@ func TestInferAndValidate_Join_SameNameKey_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// logins: timestamp, userId, action (3 cols)
-	// users:  timestamp, userId, tier (3 cols) — userId deduped
-	// output: timestamp(logins), userId(logins), action, timestamp(users), tier = 5 cols
+	// logins: ingest_time, userId, action (3 cols)
+	// users:  ingest_time, userId, tier (3 cols) — userId deduped
+	// output: ingest_time(logins), userId(logins), action, ingest_time(users), tier = 5 cols
 	if len(meta) != 5 {
 		t.Fatalf("len(meta) = %d, want 5; meta = %+v", len(meta), meta)
 	}
@@ -679,8 +679,8 @@ func TestInferAndValidate_Join_SameNameKey_Valid(t *testing.T) {
 
 func TestInferAndValidate_Join_SameNameKey_MissingInLeft_IsError(t *testing.T) {
 	schemas := map[string]*source.Schema{
-		"requests": mkSchema(mkCol("timestamp", source.TypeDatetime), mkCol("statusCode", source.TypeInt32)),
-		"users":    mkSchema(mkCol("timestamp", source.TypeDatetime), mkCol("userId", source.TypeString)),
+		"requests": mkSchema(mkCol("ingest_time", source.TypeDatetime), mkCol("statusCode", source.TypeInt32)),
+		"users":    mkSchema(mkCol("ingest_time", source.TypeDatetime), mkCol("userId", source.TypeString)),
 	}
 	node := &LogicalJoin{
 		Left:  &LogicalSource{TypeName: "requests"},
@@ -695,8 +695,8 @@ func TestInferAndValidate_Join_SameNameKey_MissingInLeft_IsError(t *testing.T) {
 
 func TestInferAndValidate_Join_SameNameKey_MissingInRight_IsError(t *testing.T) {
 	schemas := map[string]*source.Schema{
-		"requests": mkSchema(mkCol("timestamp", source.TypeDatetime), mkCol("userId", source.TypeString)),
-		"users":    mkSchema(mkCol("timestamp", source.TypeDatetime), mkCol("tier", source.TypeString)),
+		"requests": mkSchema(mkCol("ingest_time", source.TypeDatetime), mkCol("userId", source.TypeString)),
+		"users":    mkSchema(mkCol("ingest_time", source.TypeDatetime), mkCol("tier", source.TypeString)),
 	}
 	node := &LogicalJoin{
 		Left:  &LogicalSource{TypeName: "requests"},
