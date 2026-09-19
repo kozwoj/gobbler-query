@@ -1,47 +1,31 @@
 # Gobbler Query Overview
 
-**Gobbler Query** is a query engine for telemetry data collected by [Gobbler](https://github.com/kozwoj/gobbler) written in Go. It is the third component in the Gobbler suite:
-
-```mermaid
-flowchart LR
-    classDef thick stroke-width:3px,stroke:#222;
-
-    C:::thick
-    D:::thick
-
-    A["Application\n(with gobbler-client)"]
-    B["Gobbler Server\n(gobbler ingestion pipeline)"]
-    C[("Storage\n(CSV files or Azure Blobs)")]
-    D["GQL Query Engine\n(gobbler-query)"]
-
-    A -->|"HTTP POST /ingest"| B
-    B -->|"timestamped CSV items"| C
-    C -->|"gq query run '...'"| D
-```
+**Gobbler Query** is the query component of the `Gobbler Telemetry Suite`, which was designed to be a minimalistic, self-contained, yet fully functional monitoring solution written in Go. The components of the suite are:
 
 | Component | Repository | Role |
 |---|---|---|
-| **gobbler-client** | [kozwoj/gobbler-client](https://github.com/kozwoj/gobbler-client) | Go SDK — to instrument your application |
-| **gobbler** | [kozwoj/gobbler](https://github.com/kozwoj/gobbler) | Server — accept, validated, buffer, and flush telemetry items to storage |
-| **gobbler-query** | *this repo* | GQL Query Engine — analyze stored telemetry with GQL |
+| **gobbler-query** | *this repo* | GQL query engine — embedded in gobbler and available as a standalone CLI (`gq`) for querying telemetry data collected by Gobbler|
+| **gobbler** | [kozwoj/gobbler](https://github.com/kozwoj/gobbler) | Gobbler pipeline server — accepts, validates, buffers, and flushes telemetry items to storage; also exposes a GQL query endpoint (`POST /gobbler/query`) over stored data |
+| **gobbler-query** | [kozwoj/gobbler-query](https://github.com/kozwoj/gobbler-query) | GQL query engine — embedded in gobbler and available as a standalone CLI (`gq`) for querying collected telemetry data |
+| **gobbler-client** | [kozwoj/gobbler-client](https://github.com/kozwoj/gobbler-client) | Go SDK — used to instrument applications to send telemetry to Gobbler | 
+| **gobbler-agent** | [kozwoj/gobbler-agent](https://github.com/kozwoj/gobbler-agent) | Linux host agent — manages containerized Gobbler instances running in Docker |
+| **gobbler-portal** | [kozwoj/gobbler-portal](https://github.com/kozwoj/gobbler-portal) | Admin controller — manages hosts, native/containerized instances, definitions, pipelines, and queries |
+| **gobbler-test** | [kozwoj/gobbler-test](https://github.com/kozwoj/gobbler-test) | Scenario simulator — generates realistic test telemetry against one or more running Gobbler instances |
 
----
+<img src="images/gobbler-suite_query.jpg" width="800" alt="Photo">
 
 Queries are written in a pipeline-style query language **GQL** (Gobbler Query Language), which is a subset of [KQL (Kusto Query Language)](https://learn.microsoft.com/en-us/azure/data-explorer/kusto/query/), with limitations and one modification, described in `GQL vs KQL` section.
 
 ## Use Cases
 
-Gobbler Query was written as an exercise of implementing a pipeline query engine for time-stamped telemetry data in Go. Although the work can be classified as "academic exercise", the Gobbler suite has been sufficiently tested to be used in these use cases:    
+Gobbler Query was written as an exercise of implementing a pipeline query engine for time-stamped telemetry data collected by Gobbler. It can be used in these tw0 scenarios:    
 
-- **Local monitoring** — a lightweight, low-cost alternative to cloud monitoring services for non-critical scenarios running on a single machine, LAN or in Azure.
+- **Local monitoring and analysis** — a lightweight, low-cost alternative to cloud monitoring and analysis services for use-cases running on a single machine, LAN or in Azure.
 - **KQL learning path** — use GQL to query time-stamped CSV files with known item schemas before migrating the same queries to Azure Data Explorer (ADX / Kusto). GQL is a subset of KQL, so queries should transfer with small, local modification (in GQL the source/input stage has explicit time window).
-- **ADX on-ramp** — Gobbler-produced CSV files can be ingested into Azure Analytics (Kusto) for high-volume production scenarios, and GQL queries can serve as the development and validation stage before that migration.
-
----
 
 ## How Gobbler Stores Data
 
-Gobbler Query analyzes data ingested and stored by Gobbler server. Gobbler ingests, validates and stores telemetry items of predefined types. Items of the same type are stored in type-specific CSV files. Once an items is validated Gobbler prepends the ingest timestamp in the first property called `ingest_time`. Since the items are stored in the order they arrived, they are stored in the ingest time sequence. Gobbler creates one directory (or Azure container) per item type. The directory name comes from the `folder` field in the item definition (defaults to type `name` if `folder` is not given). Each directory holds item schema file and a series of time-stamped CSV data files, one per rotation period:
+Gobbler Query analyzes data ingested and stored by Gobbler server. Gobbler ingests, validates and stores telemetry items of predefined types. Items of the same type are stored in type-specific CSV files. Once an item is validated, Gobbler prepends it with the ingest timestamp in the first property called `ingest_time`. Since the items are stored in the order they arrived, they are stored in the ingest time sequence. Gobbler creates one directory (or Azure container) per item type. The directory name comes from the `folder` field in the item definition (defaults to type `name` if `folder` is not given). Each directory holds item schema file and a series of time-stamped CSV data files, one per rotation period:
 
 ```mermaid
 ---
@@ -67,13 +51,13 @@ treeView-beta
 ```
 
 
-**`{typeName}.json`** — written by Gobbler when the directory is first created. It lists column names and types in order. Gobbler Query reads this once per query to parse CSV rows, so no access to the running Gobbler instance is needed.
+**`{typeName}.json`** — written by Gobbler when the directory is first created. It lists column names and the type's definition order. Gobbler Query reads this once per query to parse CSV rows, so no access to the running Gobbler instance is needed.
 
 **`YYYY-MM-DD_HH-MM-SS.mmm_{typeName}.csv`** — one file per rotation period. The timestamp in the filename is the ingest time of the **first item** stored in that file. Files have no header row - the order of columns matches the schema file. 
 
 ### Why time windows matter
 
-Since items are stored in the ingest time sequence, the data file names can be used to decide when the file starts. Hence, gobbler queries can skip entire files without opening them. A query for `(last 24h)` reads only files whose names fall within that window — 2 files out of 14 in a week of data where rotation time is 12 hours. This matters most for Azure Blob Storage, where listing and downloading blobs has a per-operation cost.
+Since items are stored in the ingest time sequence, the data file names can be used to decide when the file starts. Hence, queries can skip entire files without opening them. A query for `(last 24h)` reads only files whose names fall within that window — 2 files out of 14 in a week of data where rotation time is 12 hours. This matters most for Azure Blob Storage, where listing and downloading blobs has a per-operation cost.
 
 The same model applies to Azure Blob mode: one container per item type, one `{typeName}.json` blob for the schema, and one append blob per rotation period following the same naming convention.
 
